@@ -123,6 +123,11 @@ class DropletInclusionPipeline:
         stack = np.stack(images, axis=0)
         min_proj = np.min(stack, axis=0)
 
+        max_val = int(min_proj.max())
+        if max_val > 0:
+            scale = 255.0 / max_val
+            min_proj = min_proj.astype(np.float32) * scale
+
         return np.clip(min_proj, 0, 255).astype(np.uint8)
 
     def detect_droplets_cellpose(self, image):
