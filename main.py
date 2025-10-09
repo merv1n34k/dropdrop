@@ -109,11 +109,27 @@ class DropletInclusionPipeline:
         return frame_groups
 
     def create_min_projection(self, z_stack_files):
-        """Create minimum intensity projection from z-stack."""
+        """Create minimum intensity projection from z-stack"""
         images = []
         for z_idx, filepath in z_stack_files:
-            img = cv2.imread(str(filepath), cv2.IMREAD_GRAYSCALE)
+            # Handle different bit depth
+            img = cv2.imread(str(filepath), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
             if img is not None:
+                # Scale image to 0-255 range if needed
+                if img.dtype == np.uint16:
+                    p2, p98 = np.percentile(img, (2, 98))
+                    img = np.clip(img, p2, p98)
+                    img = ((img - p2) / (p98 - p2) * 255).astype(np.uint8)
+                elif img.dtype != np.uint8:
+                    img_min = img.min()
+                    img_max = img.max()
+                    if img_max > img_min:
+                        img = ((img - img_min) / (img_max - img_min) * 255).astype(
+                            np.uint8
+                        )
+                    else:
+                        img = np.zeros_like(img, dtype=np.uint8)
+
                 images.append(img)
 
         if not images:
@@ -123,16 +139,10 @@ class DropletInclusionPipeline:
         stack = np.stack(images, axis=0)
         min_proj = np.min(stack, axis=0)
 
-        max_val = int(min_proj.max())
-        if max_val > 0:
-            scale = 255.0 / max_val
-            min_proj = min_proj.astype(np.float32) * scale
-
-        return np.clip(min_proj, 0, 255).astype(np.uint8)
+        return min_proj.astype(np.uint8)
 
     def detect_droplets_cellpose(self, image):
         """Detect droplets using Cellpose."""
-        # Initialize Cellpose model
         model = CellposeModel(gpu=True)
 
         masks, flows, styles = model.eval(
@@ -398,7 +408,7 @@ class DropletInclusionPipeline:
             f"  Frame {frame_idx}: {len(frame_data)} valid droplets (after erosion), {total_inclusions} total inclusions"
         )
 
-    def run(self, input_dir, output_dir):
+    def run(self, input_dir, output_dir, frame_limit=None):
         """Run the complete pipeline."""
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -411,10 +421,17 @@ class DropletInclusionPipeline:
             print("ERROR: No valid images found!")
             return None
 
-        print(f"Found {len(frame_groups)} frames to process\n")
+        frame_indices = sorted(frame_groups.keys())
+        if frame_limit and frame_limit > 0:
+            frame_indices = frame_indices[:frame_limit]
+            print(f"Processing limited to first {frame_limit} frames")
+
+        print(
+            f"Found {len(frame_groups)} frames total, processing {len(frame_indices)} frames\n"
+        )
 
         # Process each frame
-        for frame_idx in tqdm(sorted(frame_groups.keys()), desc="Processing frames"):
+        for frame_idx in tqdm(frame_indices, desc="Processing frames"):
             # Create min projection
             min_proj = self.create_min_projection(frame_groups[frame_idx])
 
@@ -1127,6 +1144,13 @@ def main():
     parser.add_argument(
         "--stats", action="store_true", help="Generate statistical analysis and plots"
     )
+    parser.add_argument(
+        "-n",
+        "--number",
+        type=int,
+        default=None,
+        help="Process only the first N frames (for testing)",
+    )
 
     args = parser.parse_args()
 
@@ -1138,10 +1162,12 @@ def main():
     # Initialize and run pipeline
     print(f"Input directory: {args.input_dir}")
     print(f"Output directory: {args.output_dir}")
+    if args.number:
+        print(f"Frame limit: {args.number}")
 
     # Create pipeline with visualization storage if viewer is requested
     pipeline = DropletInclusionPipeline(store_visualizations=args.view)
-    results = pipeline.run(args.input_dir, args.output_dir)
+    results = pipeline.run(args.input_dir, args.output_dir, frame_limit=args.number)
 
     if results:
         print("\n✓ Pipeline completed successfully!")
