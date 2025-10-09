@@ -109,37 +109,37 @@ class DropletInclusionPipeline:
         return frame_groups
 
     def create_min_projection(self, z_stack_files):
-        """Create minimum intensity projection from z-stack"""
+        """Create minimum intensity projection with CLAHE preprocessing."""
         images = []
         for z_idx, filepath in z_stack_files:
-            # Handle different bit depth
             img = cv2.imread(str(filepath), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
             if img is not None:
-                # Scale image to 0-255 range if needed
+                # Convert to 8-bit first
                 if img.dtype == np.uint16:
-                    p2, p98 = np.percentile(img, (2, 98))
-                    img = np.clip(img, p2, p98)
-                    img = ((img - p2) / (p98 - p2) * 255).astype(np.uint8)
+                    p5, p95 = np.percentile(
+                        img, (5, 95)
+                    )  # Use 5-95 percentile for less aggressive scaling
+                    img = np.clip(img, p5, p95)
+                    img = ((img - p5) / (p95 - p5) * 255).astype(np.uint8)
                 elif img.dtype != np.uint8:
-                    img_min = img.min()
-                    img_max = img.max()
-                    if img_max > img_min:
-                        img = ((img - img_min) / (img_max - img_min) * 255).astype(
-                            np.uint8
-                        )
-                    else:
-                        img = np.zeros_like(img, dtype=np.uint8)
+                    img = cv2.normalize(
+                        img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                    )
 
                 images.append(img)
 
         if not images:
             return None
 
-        # Stack and compute minimum
+        # Create min projection
         stack = np.stack(images, axis=0)
-        min_proj = np.min(stack, axis=0)
+        min_proj = np.min(stack, axis=0).astype(np.uint8)
 
-        return min_proj.astype(np.uint8)
+        # Apply CLAHE to normalize local contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        min_proj = clahe.apply(min_proj)
+
+        return min_proj
 
     def detect_droplets_cellpose(self, image):
         """Detect droplets using Cellpose."""
