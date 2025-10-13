@@ -34,12 +34,11 @@ except ImportError:
 class DropletInclusionPipeline:
     """Main pipeline for droplet and inclusion detection."""
 
-    def __init__(self, store_visualizations=False, comparison_mode=False):
+    def __init__(self, store_visualizations=False):
         """Initialize pipeline with configuration."""
         self.config = self.load_config()
         self.results_data = []
         self.store_visualizations = store_visualizations
-        self.comparison_mode = comparison_mode
         self.visualization_data = {} if store_visualizations else None
 
     def load_config(self):
@@ -140,45 +139,6 @@ class DropletInclusionPipeline:
         min_proj = clahe.apply(min_proj)
 
         return min_proj
-
-    def detect_droplets_hough(self, image):
-        """Detect droplets using Canny edges and HoughCircles (alternative to Cellpose)."""
-        # Apply median blur to reduce noise
-        blurred = cv2.medianBlur(image, 5)
-
-        # Canny edge detection
-        edges = cv2.Canny(blurred, 50, 150)
-
-        # HoughCircles detection
-        circles = cv2.HoughCircles(
-            blurred,
-            cv2.HOUGH_GRADIENT,
-            dp=1.0,
-            minDist=self.config.get("min_droplet_diameter", 80) // 2,
-            param1=150,  # Canny high threshold
-            param2=30,  # Accumulator threshold
-            minRadius=self.config["min_droplet_diameter"] // 2,
-            maxRadius=self.config["max_droplet_diameter"] // 2,
-        )
-
-        if circles is None:
-            return [], edges
-
-        # Convert circles to coordinate format (same as Cellpose output)
-        circles = np.uint16(np.around(circles))
-        coordinate_list = []
-
-        for x, y, r in circles[0, :]:
-            # Create circular mask for this droplet
-            mask = np.zeros(image.shape, dtype=np.uint8)
-            cv2.circle(mask, (x, y), r, 255, -1)
-
-            # Convert to coordinates (same format as Cellpose)
-            coords = self.mask_to_coordinates(mask)
-            if coords is not None:
-                coordinate_list.append(coords)
-
-        return coordinate_list, edges
 
     def detect_droplets_cellpose(self, image):
         """Detect droplets using Cellpose."""
@@ -345,22 +305,8 @@ class DropletInclusionPipeline:
                 "masked_images": [],
             }
 
-            if self.comparison_mode:
-                frame_viz["hough_masks"] = []
-                frame_viz["canny_edges"] = None
-
         # Detect droplets
         droplet_coords = self.detect_droplets_cellpose(min_projection)
-
-        # If comparison mode, also detect with Hough circles
-        if self.comparison_mode:
-            hough_coords, edges = self.detect_droplets_hough(min_projection)
-            if self.store_visualizations:
-                frame_viz["canny_edges"] = edges
-                # Store Hough detections
-                for coords in hough_coords:
-                    mask = self.coordinates_to_mask(coords, min_projection.shape)
-                    frame_viz["hough_masks"].append(mask)
 
         if not droplet_coords:
             print(f"  Frame {frame_idx}: No droplets detected")
@@ -628,18 +574,6 @@ class InteractiveViewer:
             color_val = (i * 30) % 200 + 55
             droplet_overlay[droplet_mask > 0] = [color_val, color_val, 0]
         images.append(("Cellpose Detection", droplet_overlay))
-
-        # 2b. If comparison mode, show Hough detection
-        if "hough_masks" in frame_data and frame_data["hough_masks"]:
-            hough_overlay = np.zeros((h, w, 3), dtype=np.uint8)
-            for i, mask in enumerate(frame_data["hough_masks"]):
-                color_val = (i * 30) % 200 + 55
-                hough_overlay[mask > 0] = [0, color_val, color_val]  # Different color
-            images.append(("Hough Detection", hough_overlay))
-        elif "canny_edges" in frame_data and frame_data["canny_edges"] is not None:
-            # Show Canny edges if no Hough circles found
-            edges_bgr = cv2.cvtColor(frame_data["canny_edges"], cv2.COLOR_GRAY2BGR)
-            images.append(("Canny Edges", edges_bgr))
 
         # 3. Eroded Masks
         eroded_overlay = np.zeros((h, w, 3), dtype=np.uint8)
@@ -1215,12 +1149,6 @@ def main():
         default=None,
         help="Process only the first N frames (for testing)",
     )
-    parser.add_argument(
-        "--comp",
-        action="store_true",
-        help="Compare Cellpose vs Hough circles detection methods",
-    )
-
     args = parser.parse_args()
 
     # Check input directory exists
@@ -1235,9 +1163,7 @@ def main():
         print(f"Frame limit: {args.number}")
 
     # Create pipeline with visualization storage if viewer is requested
-    pipeline = DropletInclusionPipeline(
-        store_visualizations=args.view, comparison_mode=args.comp
-    )
+    pipeline = DropletInclusionPipeline(store_visualizations=args.view)
     results = pipeline.run(args.input_dir, args.output_dir, frame_limit=args.number)
 
     if results:
