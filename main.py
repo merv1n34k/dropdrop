@@ -117,17 +117,15 @@ class DropletInclusionPipeline:
             if img is not None:
                 # Convert to 8-bit first
                 if img.dtype == np.uint16:
-                    p5, p95 = np.percentile(
-                        img, (5, 95)
-                    )  # Use 5-95 percentile for less aggressive scaling
-                    img = np.clip(img, p5, p95)
-                    img = ((img - p5) / (p95 - p5) * 255).astype(np.uint8)
-                elif img.dtype != np.uint8:
-                    img = cv2.normalize(
-                        img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-                    )
-
-                images.append(img)
+                    # Apply multiplication in original bit depth
+                    img = img.astype(np.float32) * 64
+                    # Now convert to 8-bit based on the data type maximum
+                    img = np.clip(img, 0, 65535)  # Clip to 16-bit max
+                    img = (img / 256).astype(np.uint8)
+                else:
+                    # Already in 8-bit range
+                    img = np.clip(img, 0, 255).astype(np.uint8)
+                    images.append(img)
 
         if not images:
             return None
