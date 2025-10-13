@@ -125,7 +125,8 @@ class DropletInclusionPipeline:
                 else:
                     # Already in 8-bit range
                     img = np.clip(img, 0, 255).astype(np.uint8)
-                    images.append(img)
+
+                images.append(img)
 
         if not images:
             return None
