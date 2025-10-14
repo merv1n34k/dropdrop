@@ -483,23 +483,50 @@ class DropletInclusionPipeline:
             print(f"  {count} inclusions: {num_droplets} droplets")
 
 
-class InteractiveViewer:
-    """Interactive viewer for detection results - displays pre-computed data only."""
+class BaseWindow:
+    """Base class for all window-based interfaces."""
 
-    def __init__(self, visualization_data, results_df):
-        """Initialize viewer with pre-computed visualization data."""
+    def __init__(self, visualization_data):
         self.visualization_data = visualization_data
-        self.df = results_df
         self.frames = sorted(visualization_data.keys())
         self.current_index = 0
+        self.window_name = "Window"
 
-        # Display settings
-        self.mode = "steps"  # 'steps' or 'overlay'
+    def navigate(self):
+        """Handle keyboard navigation - common for all windows."""
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q") or key == 27:  # q or ESC
+            return False
+        elif key == 83 or key == ord(" "):  # Right arrow or space
+            self.current_index = (self.current_index + 1) % len(self.frames)
+        elif key == 81:  # Left arrow
+            self.current_index = (self.current_index - 1) % len(self.frames)
+        elif key == 13:  # Enter
+            if self.current_index < len(self.frames) - 1:
+                self.current_index += 1
+            else:
+                return False  # Exit on last frame
+
+        return True
+
+    def get_current_frame_data(self):
+        """Get current frame visualization data."""
+        return self.visualization_data[self.frames[self.current_index]]
+
+    def run(self):
+        """Main window loop - to be overridden."""
+        raise NotImplementedError
+
+
+class Viewer(BaseWindow):
+    """Interactive viewer for detection results."""
+
+    def __init__(self, visualization_data, results_df):
+        super().__init__(visualization_data)
+        self.df = results_df
+        self.mode = "steps"
         self.window_name = "Droplet Detection Viewer"
-
-        if not self.frames:
-            print("Error: No visualization data available")
-            return
 
     def create_overlay(self, frame_idx):
         """Create overlay visualization from stored data."""
@@ -637,20 +664,9 @@ class InteractiveViewer:
         return collage
 
     def run(self):
-        """Run interactive viewer."""
-        print("\n" + "=" * 50)
-        print("INTERACTIVE VIEWER")
-        print("=" * 50)
-        print("Controls:")
-        print("  → / Space / Click : Next frame")
-        print("  ←                 : Previous frame")
-        print("  m                 : Toggle mode (steps/overlay)")
-        print("  q / ESC           : Quit")
-        print("=" * 50 + "\n")
-
+        """Run viewer with mode switching."""
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
-        # Mouse callback for navigation
         def mouse_callback(event, x, y, flags, param):
             if event == cv2.EVENT_LBUTTONDOWN:
                 self.current_index = (self.current_index + 1) % len(self.frames)
@@ -658,48 +674,125 @@ class InteractiveViewer:
         cv2.setMouseCallback(self.window_name, mouse_callback)
 
         while True:
-            # Get current frame
             frame_idx = self.frames[self.current_index]
 
-            # Create visualization based on mode
             if self.mode == "overlay":
                 display_img = self.create_overlay(frame_idx)
-                mode_text = "Overlay"
-            else:  # steps mode
+            else:
                 display_img = self.create_steps(frame_idx)
-                mode_text = "Steps"
 
-            # Add navigation info
-            nav_text = f"[{self.current_index + 1}/{len(self.frames)}] Mode: {mode_text} (press 'm' to toggle)"
-            h = display_img.shape[0]
-            cv2.putText(
-                display_img,
-                nav_text,
-                (10, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 0, 0),
-                1,
-            )
-
-            # Show image
             cv2.imshow(self.window_name, display_img)
 
-            # Handle keyboard input
+            # Check for mode switch
             key = cv2.waitKey(1) & 0xFF
-
-            if key == ord("q") or key == 27:  # q or ESC
-                break
-            elif key == ord(" ") or key == 83:  # Space or right arrow
-                self.current_index = (self.current_index + 1) % len(self.frames)
-            elif key == 81:  # Left arrow
-                self.current_index = (self.current_index - 1) % len(self.frames)
-            elif key == ord("m"):  # Toggle mode
+            if key == ord("m"):
                 self.mode = "overlay" if self.mode == "steps" else "steps"
-                print(f"Switched to {self.mode} mode")
+                continue
+
+            # Handle navigation
+            if not self.navigate():
+                break
 
         cv2.destroyAllWindows()
-        print("\nViewer closed")
+
+
+class InclusionEditor(BaseWindow):
+    """Interactive editor for inclusion corrections."""
+
+    def __init__(self, visualization_data, results_data):
+        super().__init__(visualization_data)
+        self.results_data = results_data
+        self.window_name = "Inclusion Editor"
+        self.inclusions = {}  # {frame_idx: [(x, y), ...]}
+        self.initialize_inclusions()
+
+    def initialize_inclusions(self):
+        """Initialize inclusions from detected masks - use centroids only."""
+        for frame_idx in self.frames:
+            self.inclusions[frame_idx] = []
+            frame_data = self.visualization_data[frame_idx]
+
+            # Combine all inclusion masks
+            if "inclusion_masks" in frame_data:
+                for mask in frame_data["inclusion_masks"]:
+                    if np.any(mask):
+                        # Find connected components and get centroids
+                        num_labels, labels, stats, centroids = (
+                            cv2.connectedComponentsWithStats(
+                                mask.astype(np.uint8), connectivity=8
+                            )
+                        )
+                        # Skip background (label 0)
+                        for i in range(1, num_labels):
+                            cx, cy = centroids[i]
+                            self.inclusions[frame_idx].append((int(cx), int(cy)))
+
+    def draw_frame(self):
+        """Draw current frame with inclusions."""
+        frame_data = self.get_current_frame_data()
+        min_proj = frame_data["min_projection"]
+        frame_idx = self.frames[self.current_index]
+
+        # Convert to BGR
+        display = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
+
+        # Draw each inclusion as semi-transparent red circle
+        for x, y in self.inclusions[frame_idx]:
+            overlay = display.copy()
+            cv2.circle(overlay, (x, y), 7, (0, 0, 255), -1)  # 15px diameter
+            display = cv2.addWeighted(display, 0.5, overlay, 0.5, 0)
+
+        # Add status
+        count = len(self.inclusions[frame_idx])
+        status = f"Frame {frame_idx} | Inclusions: {count}"
+        cv2.putText(
+            display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+        )
+
+        return display
+
+    def run(self):
+        """Run interactive editor."""
+        print("\nINTERACTIVE INCLUSION EDITOR")
+        print("Left: Add | Right: Remove | Arrows: Navigate | q: Exit\n")
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+
+        def mouse_callback(event, x, y, flags, param):
+            frame_idx = self.frames[self.current_index]
+
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.inclusions[frame_idx].append((x, y))
+                print(f"Added inclusion at: {x},{y}")
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                if self.inclusions[frame_idx]:
+                    distances = [
+                        np.sqrt((x - ix) ** 2 + (y - iy) ** 2)
+                        for ix, iy in self.inclusions[frame_idx]
+                    ]
+                    if min(distances) < 20:
+                        idx = distances.index(min(distances))
+                        ix, iy = self.inclusions[frame_idx].pop(idx)
+                        print(f"Removed inclusion at: {ix},{iy}")
+
+        cv2.setMouseCallback(self.window_name, mouse_callback)
+
+        while True:
+            display = self.draw_frame()
+            cv2.imshow(self.window_name, display)
+
+            if not self.navigate():
+                break
+
+        cv2.destroyAllWindows()
+
+        # Update results with new counts
+        for row in self.results_data:
+            frame_idx = row["frame"]
+            row["inclusions"] = len(self.inclusions.get(frame_idx, []))
+            row["detected"] = False
+
+        return self.results_data
 
 
 class DropletStatistics:
@@ -1135,8 +1228,15 @@ def main():
 
     parser.add_argument("output_dir", type=str, help="Output directory for results")
 
-    parser.add_argument(
+    viewer_group = parser.add_mutually_exclusive_group()
+    viewer_group.add_argument(
         "--view", action="store_true", help="Enable interactive viewer after processing"
+    )
+    viewer_group.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Interactive inclusion correction mode",
     )
 
     parser.add_argument(
@@ -1158,34 +1258,46 @@ def main():
 
     # Initialize and run pipeline
     print(f"Input directory: {args.input_dir}")
+    print("WORKED") if args.interactive else print("FUCK")
     print(f"Output directory: {args.output_dir}")
     if args.number:
         print(f"Frame limit: {args.number}")
 
     # Create pipeline with visualization storage if viewer is requested
-    pipeline = DropletInclusionPipeline(store_visualizations=args.view)
+    store_viz = False
+    if args.view or args.interactive:
+        store_viz = True
+    pipeline = DropletInclusionPipeline(store_visualizations=store_viz)
     results = pipeline.run(args.input_dir, args.output_dir, frame_limit=args.number)
 
     if results:
         print("\n✓ Pipeline completed successfully!")
 
-        # Generate statistics if requested
+        # Interactive editing mode
+        if args.interactive and pipeline.visualization_data:
+            print("\nLaunching interactive inclusion editor...")
+            editor = InclusionEditor(pipeline.visualization_data, results)
+            results = editor.run()  # Update results with manual corrections
+
+            # Save updated results
+            df = pd.DataFrame(results)
+            csv_path = Path(args.output_dir) / "results.csv"
+            df.to_csv(csv_path, index=False)
+            print(f"Updated results saved to: {csv_path}")
+
+        # Generate statistics (after any interactive corrections)
         if args.stats:
             print("\nGenerating statistical analysis...")
             csv_path = Path(args.output_dir) / "results.csv"
             stats_module = DropletStatistics(csv_path, pipeline.config)
             stats_module.run_analysis(args.output_dir)
 
-        # Launch viewer if requested
-        if args.view:
-            csv_path = Path(args.output_dir) / "results.csv"
-            if csv_path.exists() and pipeline.visualization_data:
-                print("\nLaunching interactive viewer...")
-                df = pd.DataFrame(results)
-                viewer = InteractiveViewer(pipeline.visualization_data, df)
-                viewer.run()
-            else:
-                print("Warning: Visualization data not available")
+        # Launch viewer if requested (no editing, just viewing)
+        if args.view and pipeline.visualization_data:
+            print("\nLaunching interactive viewer...")
+            df = pd.DataFrame(results)
+            viewer = Viewer(pipeline.visualization_data, df)
+            viewer.run()
 
 
 if __name__ == "__main__":
