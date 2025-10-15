@@ -455,32 +455,11 @@ class DropletInclusionPipeline:
         return self.results_data
 
     def print_summary(self, df):
-        """Print summary statistics."""
-        print("\n" + "=" * 50)
-        print("PIPELINE SUMMARY")
-        print("=" * 50)
-        print(f"Total frames processed: {df['frame'].nunique()}")
-        print(f"Total droplets detected: {len(df)}")
-        print(f"Total inclusions detected: {df['inclusions'].sum()}")
-        print(f"\nDroplet statistics:")
+        """Print one-line summary."""
         print(
-            f"  Mean diameter: {df['diameter_um'].mean():.2f} ± {df['diameter_um'].std():.2f} µm"
+            f"\nDetected {len(df)} droplets with {df['inclusions'].sum()} inclusions "
+            f"({df['inclusions'].mean():.2f} per droplet)"
         )
-        print(
-            f"  Diameter range: {df['diameter_um'].min():.2f} - {df['diameter_um'].max():.2f} µm"
-        )
-        print(f"\nInclusion statistics:")
-        print(f"  Mean per droplet: {df['inclusions'].mean():.2f}")
-        print(f"  Max per droplet: {df['inclusions'].max()}")
-        print(
-            f"  Droplets with inclusions: {(df['inclusions'] > 0).sum()} ({(df['inclusions'] > 0).sum() / len(df) * 100:.1f}%)"
-        )
-
-        # Distribution of inclusions
-        inclusion_counts = df["inclusions"].value_counts().sort_index()
-        print(f"\nInclusion distribution:")
-        for count, num_droplets in inclusion_counts.head(10).items():
-            print(f"  {count} inclusions: {num_droplets} droplets")
 
 
 class BaseWindow:
@@ -704,6 +683,8 @@ class InclusionEditor(BaseWindow):
         self.results_data = results_data
         self.window_name = "Inclusion Editor"
         self.inclusions = {}  # {frame_idx: [(x, y), ...]}
+        self.right_mouse_down = False  # Track right mouse button state
+        self.mouse_pos = (0, 0)  # Track current mouse position
         self.initialize_inclusions()
 
     def initialize_inclusions(self):
@@ -727,6 +708,22 @@ class InclusionEditor(BaseWindow):
                             cx, cy = centroids[i]
                             self.inclusions[frame_idx].append((int(cx), int(cy)))
 
+    def remove_inclusion_at(self, x, y):
+        """Remove inclusion nearest to position if within threshold."""
+        frame_idx = self.frames[self.current_index]
+        if self.inclusions[frame_idx]:
+            distances = [
+                np.sqrt((x - ix) ** 2 + (y - iy) ** 2)
+                for ix, iy in self.inclusions[frame_idx]
+            ]
+            min_dist = min(distances)
+            if min_dist < 20:
+                idx = distances.index(min_dist)
+                ix, iy = self.inclusions[frame_idx].pop(idx)
+                print(f"Removed inclusion at: {ix},{iy}")
+                return True
+        return False
+
     def draw_frame(self):
         """Draw current frame with inclusions."""
         frame_data = self.get_current_frame_data()
@@ -749,31 +746,68 @@ class InclusionEditor(BaseWindow):
             display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
 
+        # Add controls hint
+        hint = "Left: Add | Right(hold): Remove | c: Clear all | Arrows: Navigate | q/Esc: Exit"
+        cv2.putText(
+            display,
+            hint,
+            (10, display.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 0),
+            1,
+        )
+
         return display
+
+    def update_results_with_inclusions(self):
+        """Update results with correct per-droplet inclusion counts."""
+        for row in self.results_data:
+            frame_idx = row["frame"]
+
+            # Find inclusions that belong to this specific droplet
+            droplet_inclusions = 0
+
+            if frame_idx in self.inclusions:
+                # Check each inclusion position against droplet location
+                cx, cy = row["center_x"], row["center_y"]
+                radius = row["diameter_px"] / 2
+
+                for ix, iy in self.inclusions[frame_idx]:
+                    # Check if inclusion is within this droplet
+                    dist = np.sqrt((ix - cx) ** 2 + (iy - cy) ** 2)
+                    if dist <= radius:
+                        droplet_inclusions += 1
+
+            row["inclusions"] = droplet_inclusions
+            row["detected"] = False
+
+        return self.results_data
 
     def run(self):
         """Run interactive editor."""
         print("\nINTERACTIVE INCLUSION EDITOR")
-        print("Left: Add | Right: Remove | Arrows: Navigate | q: Exit\n")
+        print(
+            "Left: Add | Right(hold): Remove | c: Clear all | Arrows: Navigate | q/Esc: Exit\n"
+        )
 
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
         def mouse_callback(event, x, y, flags, param):
+            self.mouse_pos = (x, y)
             frame_idx = self.frames[self.current_index]
 
             if event == cv2.EVENT_LBUTTONDOWN:
                 self.inclusions[frame_idx].append((x, y))
                 print(f"Added inclusion at: {x},{y}")
             elif event == cv2.EVENT_RBUTTONDOWN:
-                if self.inclusions[frame_idx]:
-                    distances = [
-                        np.sqrt((x - ix) ** 2 + (y - iy) ** 2)
-                        for ix, iy in self.inclusions[frame_idx]
-                    ]
-                    if min(distances) < 20:
-                        idx = distances.index(min(distances))
-                        ix, iy = self.inclusions[frame_idx].pop(idx)
-                        print(f"Removed inclusion at: {ix},{iy}")
+                self.right_mouse_down = True
+                self.remove_inclusion_at(x, y)
+            elif event == cv2.EVENT_RBUTTONUP:
+                self.right_mouse_down = False
+            elif event == cv2.EVENT_MOUSEMOVE and self.right_mouse_down:
+                # Continue removing while right button held
+                self.remove_inclusion_at(x, y)
 
         cv2.setMouseCallback(self.window_name, mouse_callback)
 
@@ -781,439 +815,232 @@ class InclusionEditor(BaseWindow):
             display = self.draw_frame()
             cv2.imshow(self.window_name, display)
 
-            if not self.navigate():
+            key = cv2.waitKey(30) & 0xFF  # Faster refresh for smooth removal
+
+            if key == ord("c"):
+                # Clear all inclusions in current frame
+                frame_idx = self.frames[self.current_index]
+                count = len(self.inclusions[frame_idx])
+                self.inclusions[frame_idx] = []
+                print(f"Cleared {count} inclusions from frame {frame_idx}")
+            elif key == ord("q") or key == 27:  # q or ESC
                 break
+            elif key == 83 or key == ord(" "):  # Right arrow or space
+                self.current_index = (self.current_index + 1) % len(self.frames)
+            elif key == 81:  # Left arrow
+                self.current_index = (self.current_index - 1) % len(self.frames)
+            elif key == 13:  # Enter
+                if self.current_index < len(self.frames) - 1:
+                    self.current_index += 1
+                else:
+                    break
 
         cv2.destroyAllWindows()
 
-        # Update results with new counts
-        for row in self.results_data:
-            frame_idx = row["frame"]
-            row["inclusions"] = len(self.inclusions.get(frame_idx, []))
-            row["detected"] = False
-
-        return self.results_data
+        return self.update_results_with_inclusions()
 
 
 class DropletStatistics:
-    """Statistical analysis and visualization for droplet detection results."""
+    """Simplified statistical analysis for droplet detection."""
 
-    def __init__(self, results_csv, config=None):
-        """Initialize with results data and configuration."""
+    def __init__(self, results_csv):
+        """Initialize with results data."""
         self.df = pd.read_csv(results_csv)
-        self.config = config or {}
-
-        # Poisson parameters
-        self.bead_count = 6.5e5  # Beads per uL
+        self.bead_count = 6.5e5  # Beads per mL
         self.dilution = 1000
 
-    def calculate_theoretical_poisson(self, median_diameter_um):
-        """Calculate theoretical Poisson distribution for inclusions.
-
-        Based on:
-        - droplet_volume = (4/3) * π * (diameter/2)³ * 10^-9 (to convert µm³ to mL)
-        - lambda = bead_count / (dilution * 2) * droplet_volume
-        - Factor of 2 for mixing beads with buffer in equal volumes
-        """
-        # Calculate droplet volume in mL
+    def calculate_poisson(self, median_diameter_um):
+        """Calculate theoretical Poisson distribution."""
+        # Droplet volume in mL
         radius_um = median_diameter_um / 2
-        droplet_volume_um3 = (4 / 3) * np.pi * (radius_um**3)
-        droplet_volume_ml = droplet_volume_um3 * 1e-9
+        volume_ml = (4 / 3) * np.pi * (radius_um**3) * 1e-9
 
-        # Calculate lambda (expected inclusions per droplet)
-        lambda_val = (self.bead_count / (self.dilution * 2)) * droplet_volume_ml
+        # Lambda (expected inclusions)
+        lambda_val = (self.bead_count / (self.dilution * 2)) * volume_ml
 
-        # Calculate probabilities for inclusion counts
-        max_inclusions = int(self.df["inclusions"].max()) + 5
-        inclusion_range = np.arange(0, max_inclusions + 1)
-        theoretical_probs = stats.poisson.pmf(inclusion_range, lambda_val)
+        # Generate distribution
+        max_inc = int(self.df["inclusions"].max()) + 3
+        x_range = np.arange(0, max_inc + 1)
+        theoretical = stats.poisson.pmf(x_range, lambda_val)
 
-        return inclusion_range, theoretical_probs, lambda_val
+        return x_range, theoretical, lambda_val
 
-    def plot_diameter_distribution(self, output_path):
-        """Create and save droplet diameter distribution histogram."""
-        fig, ax = plt.subplots(figsize=(10, 6))
+    def plot_size_distribution(self, output_path):
+        """Plot droplet diameter distribution."""
+        fig, ax = plt.subplots(figsize=(8, 5))
 
-        # Get diameter data
         diameters = self.df["diameter_um"].values
+        ax.hist(diameters, bins=25, color="steelblue", edgecolor="black", alpha=0.7)
 
-        # Create histogram
-        n_bins = min(30, len(np.unique(diameters)))
-        counts, bins, patches = ax.hist(
-            diameters, bins=n_bins, color="steelblue", edgecolor="black", alpha=0.7
-        )
-
-        # Add statistics
         mean_d = np.mean(diameters)
         median_d = np.median(diameters)
-        std_d = np.std(diameters)
 
-        # Add vertical lines for mean and median
+        ax.axvline(mean_d, color="red", linestyle="--", label=f"Mean: {mean_d:.1f}")
         ax.axvline(
-            mean_d,
-            color="red",
-            linestyle="--",
-            linewidth=2,
-            label=f"Mean: {mean_d:.1f} µm",
-        )
-        ax.axvline(
-            median_d,
-            color="green",
-            linestyle="--",
-            linewidth=2,
-            label=f"Median: {median_d:.1f} µm",
+            median_d, color="green", linestyle="--", label=f"Median: {median_d:.1f}"
         )
 
-        # Labels and title
-        ax.set_xlabel("Droplet Diameter (µm)", fontsize=12)
-        ax.set_ylabel("Count", fontsize=12)
-        ax.set_title("Droplet Diameter Distribution", fontsize=14, fontweight="bold")
-
-        # Add text box with statistics
-        stats_text = f"n = {len(diameters)}\nMean = {mean_d:.1f} µm\n"
-        stats_text += f"Median = {median_d:.1f} µm\nSD = {std_d:.1f} µm"
-        ax.text(
-            0.98,
-            0.98,
-            stats_text,
-            transform=ax.transAxes,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-            fontsize=10,
-        )
-
-        ax.legend(loc="upper left")
+        ax.set_xlabel("Diameter (µm)")
+        ax.set_ylabel("Count")
+        ax.set_title("Droplet Size Distribution")
+        ax.legend()
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(
-            output_path / "diameter_distribution.png", dpi=300, bbox_inches="tight"
-        )
+        plt.savefig(output_path / "size_distribution.png", dpi=200)
         plt.close()
 
-        return mean_d, median_d, std_d
+        return mean_d, median_d
 
     def plot_poisson_comparison(self, output_path):
-        """Create Poisson distribution comparison plot."""
-        fig, ax = plt.subplots(figsize=(12, 7))
+        """Plot detected vs theoretical Poisson with chi-squared test."""
+        fig, ax = plt.subplots(figsize=(10, 6))
 
-        # Get median diameter for theoretical calculation
-        median_diameter = self.df["diameter_um"].median()
+        median_d = self.df["diameter_um"].median()
+        x_range, theoretical, lambda_val = self.calculate_poisson(median_d)
 
-        # Calculate theoretical Poisson
-        inclusion_range, theoretical_probs, lambda_val = (
-            self.calculate_theoretical_poisson(median_diameter)
-        )
+        # Actual distribution
+        actual = self.df["inclusions"].value_counts().sort_index()
+        n_droplets = len(self.df)
 
-        # Get actual inclusion distribution
-        actual_counts = self.df["inclusions"].value_counts().sort_index()
-        max_inclusions = int(actual_counts.index.max())
+        # Chi-squared test
+        chi2, p_value = self.perform_chi_squared(actual, theoretical, n_droplets)
 
-        # Ensure we have all inclusion counts from 0 to max
-        all_inclusions = np.arange(0, max(max_inclusions + 1, len(inclusion_range)))
-        actual_percentages = []
+        # Prepare data for plotting
+        detected_pct = []
+        theoretical_pct = theoretical * 100
 
-        total_droplets = len(self.df)
-        for i in all_inclusions:
-            if i in actual_counts.index:
-                actual_percentages.append(actual_counts[i] / total_droplets * 100)
+        for i in x_range:
+            if i in actual.index:
+                detected_pct.append(actual[i] / n_droplets * 100)
             else:
-                actual_percentages.append(0)
+                detected_pct.append(0)
 
-        # Prepare theoretical percentages
-        theoretical_percentages = theoretical_probs[: len(all_inclusions)] * 100
-
-        # Create grouped bar plot
-        x = np.arange(len(all_inclusions))
+        # Plot bars
+        x = np.arange(len(x_range))
         width = 0.35
 
-        bars1 = ax.bar(
+        ax.bar(
             x - width / 2,
-            actual_percentages,
+            detected_pct,
             width,
             label="Detected",
             color="royalblue",
             alpha=0.8,
         )
-        bars2 = ax.bar(
+        ax.bar(
             x + width / 2,
-            theoretical_percentages,
+            theoretical_pct[: len(x)],
             width,
-            label=f"Theoretical (λ={lambda_val:.3f})",
+            label=f"Poisson (λ={lambda_val:.3f})",
             color="coral",
             alpha=0.8,
         )
 
-        # Labels and title
-        ax.set_xlabel("Number of Inclusions", fontsize=12)
-        ax.set_ylabel("Percentage of Droplets (%)", fontsize=12)
-        ax.set_title(
-            "Inclusion Distribution: Detected vs Theoretical Poisson",
-            fontsize=14,
-            fontweight="bold",
-        )
+        # Add chi-squared result
+        if p_value is not None:
+            result_text = f"χ² = {chi2:.2f}, p = {p_value:.4f}"
+            if p_value > 0.05:
+                result_text += "\n✓ Follows Poisson"
+            else:
+                result_text += "\n✗ Deviates from Poisson"
+            ax.text(
+                0.98,
+                0.85,
+                result_text,
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=10,
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+            )
+
+        ax.set_xlabel("Inclusions per Droplet")
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title("Inclusion Distribution: Detected vs Theoretical")
         ax.set_xticks(x)
-        ax.set_xticklabels(all_inclusions)
-
-        # Add legend and grid
-        ax.legend(loc="upper right", fontsize=11)
+        ax.set_xticklabels(x_range)
+        ax.legend()
         ax.grid(True, alpha=0.3, axis="y")
 
-        # Add chi-square test if applicable (with proper frequency matching)
-        if len(actual_counts) > 1:
-            try:
-                # Get the range of observed values
-                observed_range = actual_counts.index.values
-
-                # Calculate expected counts only for observed range
-                expected_probs_subset = []
-                observed_values = []
-
-                for inc_val in observed_range:
-                    if inc_val < len(theoretical_probs):
-                        expected_probs_subset.append(theoretical_probs[inc_val])
-                        observed_values.append(actual_counts[inc_val])
-
-                if len(expected_probs_subset) > 1:
-                    # Convert to numpy arrays
-                    observed = np.array(observed_values)
-                    expected_probs_array = np.array(expected_probs_subset)
-
-                    # Normalize expected probabilities to sum to 1 for observed range
-                    expected_probs_normalized = (
-                        expected_probs_array / expected_probs_array.sum()
-                    )
-
-                    # Calculate expected counts
-                    expected_counts = expected_probs_normalized * observed.sum()
-
-                    # Only use bins with expected count > 5 for chi-square
-                    mask = expected_counts > 5
-                    if mask.sum() > 1:
-                        chi2, p_value = stats.chisquare(
-                            observed[mask], expected_counts[mask]
-                        )
-
-                        test_text = f"χ² = {chi2:.2f}, p = {p_value:.4f}"
-                        ax.text(
-                            0.98,
-                            0.85,
-                            test_text,
-                            transform=ax.transAxes,
-                            verticalalignment="top",
-                            horizontalalignment="right",
-                            bbox=dict(boxstyle="round", facecolor="yellow", alpha=0.3),
-                            fontsize=10,
-                        )
-            except Exception as e:
-                # If chi-square test fails, just skip it
-                print(f"Chi-square test skipped: {e}")
-
-        # Add parameters text
-        params_text = f"Median diameter: {median_diameter:.1f} µm\n"
-        params_text += f"Bead count: {self.bead_count:.1e}/mL\n"
-        params_text += f"Dilution: 1:{self.dilution}\n"
-        params_text += f"Expected λ: {lambda_val:.3f}"
-
-        ax.text(
-            0.98,
-            0.70,
-            params_text,
-            transform=ax.transAxes,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-            fontsize=9,
-        )
-
         plt.tight_layout()
-        plt.savefig(
-            output_path / "poisson_comparison.png", dpi=300, bbox_inches="tight"
-        )
+        plt.savefig(output_path / "poisson_comparison.png", dpi=200)
         plt.close()
 
-        return lambda_val, actual_counts, theoretical_probs
+        return lambda_val, chi2, p_value
 
-    def plot_inclusion_distribution(self, output_path):
-        """Create a simple inclusion count distribution plot."""
-        fig, ax = plt.subplots(figsize=(10, 6))
+    def perform_chi_squared(self, observed_counts, theoretical_probs, n_total):
+        """Perform chi-squared goodness-of-fit test."""
+        # Prepare observed and expected frequencies
+        observed = []
+        expected = []
 
-        # Get inclusion counts
-        inclusion_counts = self.df["inclusions"].value_counts().sort_index()
+        for i in observed_counts.index:
+            if i < len(theoretical_probs):
+                obs = observed_counts[i]
+                exp = theoretical_probs[i] * n_total
 
-        # Create bar plot
-        ax.bar(
-            inclusion_counts.index,
-            inclusion_counts.values,
-            color="darkgreen",
-            edgecolor="black",
-            alpha=0.7,
+                # Collect all bins first (we'll filter later)
+                observed.append(obs)
+                expected.append(exp)
+
+        # Convert to arrays
+        observed = np.array(observed)
+        expected = np.array(expected)
+
+        # Filter bins with expected < 5 (but keep at least 2 bins)
+        mask = expected >= 5
+        if mask.sum() < 2:
+            return None, None
+
+        observed_filtered = observed[mask]
+        expected_filtered = expected[mask]
+
+        # Normalize expected to match observed sum (fixes floating point mismatch)
+        expected_filtered = expected_filtered * (
+            observed_filtered.sum() / expected_filtered.sum()
         )
 
-        # Labels and title
-        ax.set_xlabel("Number of Inclusions per Droplet", fontsize=12)
-        ax.set_ylabel("Number of Droplets", fontsize=12)
-        ax.set_title("Inclusion Count Distribution", fontsize=14, fontweight="bold")
-
-        # Add statistics
-        mean_inc = self.df["inclusions"].mean()
-        median_inc = self.df["inclusions"].median()
-
-        stats_text = f"Mean: {mean_inc:.2f}\nMedian: {median_inc:.1f}\n"
-        stats_text += f"Total droplets: {len(self.df)}\n"
-        stats_text += f"With inclusions: {(self.df['inclusions'] > 0).sum()}"
-
-        ax.text(
-            0.98,
-            0.98,
-            stats_text,
-            transform=ax.transAxes,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-            fontsize=10,
-        )
-
-        ax.grid(True, alpha=0.3, axis="y")
-
-        # Set integer x-axis
-        ax.set_xticks(
-            range(
-                int(inclusion_counts.index.min()), int(inclusion_counts.index.max()) + 1
-            )
-        )
-
-        plt.tight_layout()
-        plt.savefig(
-            output_path / "inclusion_distribution.png", dpi=300, bbox_inches="tight"
-        )
-        plt.close()
-
-        return mean_inc, median_inc
-
-    def generate_report(self, output_path):
-        """Generate comprehensive statistical report."""
-        output_path = Path(output_path)
-
-        # Generate plots
-        print("\nGenerating statistical plots...")
-
-        # 1. Diameter distribution
-        mean_d, median_d, std_d = self.plot_diameter_distribution(output_path)
-        print("  ✓ Diameter distribution plot created")
-
-        # 2. Poisson comparison
-        lambda_val, actual_counts, theoretical_probs = self.plot_poisson_comparison(
-            output_path
-        )
-        print("  ✓ Poisson comparison plot created")
-
-        # 3. Inclusion distribution
-        mean_inc, median_inc = self.plot_inclusion_distribution(output_path)
-        print("  ✓ Inclusion distribution plot created")
-
-        # Generate text report
-        report_lines = []
-        report_lines.append("=" * 60)
-        report_lines.append("DROPLET DETECTION STATISTICAL REPORT")
-        report_lines.append("=" * 60)
-        report_lines.append(
-            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        report_lines.append("")
-
-        # Overall statistics
-        report_lines.append("OVERALL STATISTICS")
-        report_lines.append("-" * 30)
-        report_lines.append(f"Total frames analyzed: {self.df['frame'].nunique()}")
-        report_lines.append(f"Total droplets detected: {len(self.df)}")
-        report_lines.append(f"Total inclusions detected: {self.df['inclusions'].sum()}")
-        report_lines.append("")
-
-        # Droplet statistics
-        report_lines.append("DROPLET SIZE STATISTICS")
-        report_lines.append("-" * 30)
-        report_lines.append(f"Mean diameter: {mean_d:.2f} µm")
-        report_lines.append(f"Median diameter: {median_d:.2f} µm")
-        report_lines.append(f"Standard deviation: {std_d:.2f} µm")
-        report_lines.append(f"Min diameter: {self.df['diameter_um'].min():.2f} µm")
-        report_lines.append(f"Max diameter: {self.df['diameter_um'].max():.2f} µm")
-        report_lines.append("")
-
-        # Inclusion statistics
-        report_lines.append("INCLUSION STATISTICS")
-        report_lines.append("-" * 30)
-        report_lines.append(f"Mean inclusions per droplet: {mean_inc:.2f}")
-        report_lines.append(f"Median inclusions per droplet: {median_inc:.1f}")
-        report_lines.append(
-            f"Max inclusions in a single droplet: {self.df['inclusions'].max()}"
-        )
-        report_lines.append(
-            f"Droplets with inclusions: {(self.df['inclusions'] > 0).sum()} "
-            f"({(self.df['inclusions'] > 0).sum() / len(self.df) * 100:.1f}%)"
-        )
-        report_lines.append(
-            f"Droplets without inclusions: {(self.df['inclusions'] == 0).sum()} "
-            f"({(self.df['inclusions'] == 0).sum() / len(self.df) * 100:.1f}%)"
-        )
-        report_lines.append("")
-
-        # Poisson analysis
-        report_lines.append("POISSON ANALYSIS")
-        report_lines.append("-" * 30)
-        report_lines.append(f"Theoretical λ (expected inclusions): {lambda_val:.3f}")
-        report_lines.append(f"Based on median droplet diameter: {median_d:.1f} µm")
-        report_lines.append(f"Bead concentration: {self.bead_count:.1e} beads/mL")
-        report_lines.append(f"Dilution factor: 1:{self.dilution}")
-        report_lines.append("")
-
-        # Inclusion distribution
-        report_lines.append("INCLUSION DISTRIBUTION")
-        report_lines.append("-" * 30)
-        for inc_count in sorted(actual_counts.index):
-            count = actual_counts[inc_count]
-            percentage = count / len(self.df) * 100
-            report_lines.append(
-                f"  {inc_count} inclusions: {count} droplets ({percentage:.1f}%)"
-            )
-
-        report_lines.append("")
-        report_lines.append("=" * 60)
-        report_lines.append("END OF REPORT")
-        report_lines.append("=" * 60)
-
-        # Save report
-        report_text = "\n".join(report_lines)
-        report_path = output_path / "statistical_report.txt"
-        with open(report_path, "w") as f:
-            f.write(report_text)
-
-        # Print to console
-        print("\n" + report_text)
-        print(f"\nReport saved to: {report_path}")
-
-        return report_text
+        # Chi-squared test
+        chi2, p_value = stats.chisquare(observed_filtered, expected_filtered)
+        return chi2, p_value
 
     def run_analysis(self, output_dir):
-        """Run complete statistical analysis."""
+        """Run analysis and print results."""
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        output_path.mkdir(exist_ok=True)
 
-        print("\n" + "=" * 50)
-        print("STATISTICAL ANALYSIS")
-        print("=" * 50)
+        # Generate plots
+        mean_d, median_d = self.plot_size_distribution(output_path)
+        lambda_val, chi2, p_value = self.plot_poisson_comparison(output_path)
 
-        # Generate report and plots
-        self.generate_report(output_path)
+        # Calculate stats
+        total_droplets = len(self.df)
+        total_inclusions = self.df["inclusions"].sum()
+        with_inclusions = (self.df["inclusions"] > 0).sum()
 
-        print("\n✓ Statistical analysis complete!")
-        print(f"  Results saved in: {output_path}")
-        print("  Generated files:")
-        print("    - diameter_distribution.png")
-        print("    - poisson_comparison.png")
-        print("    - inclusion_distribution.png")
-        print("    - statistical_report.txt")
+        # Print summary
+        print("\nSTATISTICAL SUMMARY")
+        print("-" * 40)
+        print(f"Droplets: {total_droplets}")
+        print(f"Mean diameter: {mean_d:.1f} µm")
+        print(
+            f"Inclusions: {total_inclusions} total, {total_inclusions / total_droplets:.2f} per droplet"
+        )
+        print(
+            f"With inclusions: {with_inclusions} ({with_inclusions / total_droplets * 100:.1f}%)"
+        )
+        print(f"Theoretical λ: {lambda_val:.3f}")
+
+        if p_value is not None:
+            print(f"\nChi-squared test:")
+            print(f"  χ² = {chi2:.2f}, p = {p_value:.4f}")
+            if p_value > 0.05:
+                print("  → Distribution follows Poisson (p > 0.05)")
+            else:
+                print("  → Distribution deviates from Poisson (p < 0.05)")
+
+        print(f"\nPlots saved to: {output_path}")
 
 
 def main():
@@ -1258,7 +1085,6 @@ def main():
 
     # Initialize and run pipeline
     print(f"Input directory: {args.input_dir}")
-    print("WORKED") if args.interactive else print("FUCK")
     print(f"Output directory: {args.output_dir}")
     if args.number:
         print(f"Frame limit: {args.number}")
@@ -1271,7 +1097,7 @@ def main():
     results = pipeline.run(args.input_dir, args.output_dir, frame_limit=args.number)
 
     if results:
-        print("\n✓ Pipeline completed successfully!")
+        print("\nPipeline completed successfully!")
 
         # Interactive editing mode
         if args.interactive and pipeline.visualization_data:
@@ -1289,7 +1115,7 @@ def main():
         if args.stats:
             print("\nGenerating statistical analysis...")
             csv_path = Path(args.output_dir) / "results.csv"
-            stats_module = DropletStatistics(csv_path, pipeline.config)
+            stats_module = DropletStatistics(csv_path)
             stats_module.run_analysis(args.output_dir)
 
         # Launch viewer if requested (no editing, just viewing)
