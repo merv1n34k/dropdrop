@@ -75,9 +75,12 @@ class DropletInclusionPipeline:
             return default_config
 
     def parse_filename(self, filename):
-        """Extract z-stack index and frame index from filename."""
+        """Extract z-stack index and frame index from filename.
+
+        Files without z-index are treated as single images (z_index=0).
+        """
         z_match = re.search(r"_z(\d+)_", filename)
-        z_index = int(z_match.group(1)) if z_match else None
+        z_index = int(z_match.group(1)) if z_match else 0  # Default to 0 for non-z-stack
 
         f_match = re.search(r"a01f(\d+)d4", filename, re.IGNORECASE)
         frame_index = int(f_match.group(1)) if f_match else None
@@ -99,7 +102,7 @@ class DropletInclusionPipeline:
         frame_groups = defaultdict(list)
         for filepath in image_files:
             z_idx, frame_idx = self.parse_filename(filepath.name)
-            if z_idx is not None and frame_idx is not None:
+            if frame_idx is not None:
                 frame_groups[frame_idx].append((z_idx, filepath))
 
         # Sort z-stacks within each frame
