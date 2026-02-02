@@ -1,6 +1,6 @@
 [project]
 name = "dropdrop"
-version = "1.0.0"
+version = "1.1.0"
 description = """Python pipeline script for detecting droplets with beads and
 other inclusions via cellpose"""
 readme = "README.md"
