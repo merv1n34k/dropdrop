@@ -1,8 +1,0 @@
-cellpose
-opencv-python
-numpy
-pandas
-matplotlib
-scipy
-seaborn
-tqdm
