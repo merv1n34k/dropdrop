@@ -201,6 +201,7 @@ class InclusionEditor(BaseWindow):
         self.results_data = results_data
         self.window_name = "Inclusion Editor"
         self.inclusions = {}
+        self.undo_stack = {}  # {frame_idx: [(action, data), ...]}
         self.right_mouse_down = False
         self.mouse_pos = (0, 0)
         self.show_droplets = True
@@ -210,6 +211,7 @@ class InclusionEditor(BaseWindow):
         """Initialize inclusions from detected masks - use centroids only."""
         for frame_idx in self.frames:
             self.inclusions[frame_idx] = []
+            self.undo_stack[frame_idx] = []
             frame_data = self.visualization_data[frame_idx]
 
             if "inclusion_masks" in frame_data:
@@ -224,6 +226,14 @@ class InclusionEditor(BaseWindow):
                             cx, cy = centroids[i]
                             self.inclusions[frame_idx].append((int(cx), int(cy)))
 
+    def add_inclusion(self, x, y):
+        """Add inclusion at position with undo tracking."""
+        frame_idx = self.frames[self.current_index]
+        pos = (x, y)
+        self.inclusions[frame_idx].append(pos)
+        self.undo_stack[frame_idx].append(("add", pos))
+        print(f"Added inclusion at: {x},{y}")
+
     def remove_inclusion_at(self, x, y):
         """Remove inclusion nearest to position if within threshold."""
         frame_idx = self.frames[self.current_index]
@@ -235,10 +245,39 @@ class InclusionEditor(BaseWindow):
             min_dist = min(distances)
             if min_dist < 20:
                 idx = distances.index(min_dist)
-                ix, iy = self.inclusions[frame_idx].pop(idx)
-                print(f"Removed inclusion at: {ix},{iy}")
+                pos = self.inclusions[frame_idx].pop(idx)
+                self.undo_stack[frame_idx].append(("remove", pos))
+                print(f"Removed inclusion at: {pos}")
                 return True
         return False
+
+    def clear_inclusions(self):
+        """Clear all inclusions in current frame with undo tracking."""
+        frame_idx = self.frames[self.current_index]
+        if self.inclusions[frame_idx]:
+            old_inclusions = self.inclusions[frame_idx].copy()
+            self.undo_stack[frame_idx].append(("clear", old_inclusions))
+            self.inclusions[frame_idx] = []
+            print(f"Cleared {len(old_inclusions)} inclusions from frame {frame_idx}")
+
+    def undo(self):
+        """Undo last action in current frame."""
+        frame_idx = self.frames[self.current_index]
+        if not self.undo_stack[frame_idx]:
+            print("Nothing to undo")
+            return
+
+        action, data = self.undo_stack[frame_idx].pop()
+
+        if action == "add":
+            self.inclusions[frame_idx].remove(data)
+            print(f"Undo: removed inclusion at {data}")
+        elif action == "remove":
+            self.inclusions[frame_idx].append(data)
+            print(f"Undo: restored inclusion at {data}")
+        elif action == "clear":
+            self.inclusions[frame_idx] = data
+            print(f"Undo: restored {len(data)} inclusions")
 
     def draw_frame(self):
         """Draw current frame with droplet masks and inclusions."""
@@ -270,7 +309,7 @@ class InclusionEditor(BaseWindow):
             display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
 
-        hint = "Left: Add | Right: Remove | d: Toggle droplets | c: Clear | Arrows: Nav | q: Exit"
+        hint = "Left: Add | Right: Remove | u: Undo | c: Clear | d: Droplets | Arrows: Nav | q: Exit"
         cv2.putText(
             display,
             hint,
@@ -306,9 +345,7 @@ class InclusionEditor(BaseWindow):
     def run(self):
         """Run interactive editor."""
         print("\nINTERACTIVE INCLUSION EDITOR")
-        print(
-            "Left: Add | Right(hold): Remove | c: Clear all | Arrows: Navigate | q/Esc: Exit\n"
-        )
+        print("Left: Add | Right: Remove | u: Undo | c: Clear | d: Droplets | q: Exit\n")
 
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
@@ -317,8 +354,7 @@ class InclusionEditor(BaseWindow):
             frame_idx = self.frames[self.current_index]
 
             if event == cv2.EVENT_LBUTTONDOWN:
-                self.inclusions[frame_idx].append((x, y))
-                print(f"Added inclusion at: {x},{y}")
+                self.add_inclusion(x, y)
             elif event == cv2.EVENT_RBUTTONDOWN:
                 self.right_mouse_down = True
                 self.remove_inclusion_at(x, y)
@@ -336,10 +372,9 @@ class InclusionEditor(BaseWindow):
             key = cv2.waitKey(30) & 0xFF
 
             if key == ord("c"):
-                frame_idx = self.frames[self.current_index]
-                count = len(self.inclusions[frame_idx])
-                self.inclusions[frame_idx] = []
-                print(f"Cleared {count} inclusions from frame {frame_idx}")
+                self.clear_inclusions()
+            elif key == ord("u"):
+                self.undo()
             elif key == ord("d"):
                 self.show_droplets = not self.show_droplets
                 print(f"Droplet visibility: {'ON' if self.show_droplets else 'OFF'}")
