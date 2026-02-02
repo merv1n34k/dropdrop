@@ -202,6 +202,7 @@ class InclusionEditor(BaseWindow):
         self.window_name = "Inclusion Editor"
         self.inclusions = {}
         self.undo_stack = {}  # {frame_idx: [(action, data), ...]}
+        self.disabled_droplets = {}  # {frame_idx: set of droplet indices}
         self.right_mouse_down = False
         self.mouse_pos = (0, 0)
         self.show_droplets = True
@@ -212,6 +213,7 @@ class InclusionEditor(BaseWindow):
         for frame_idx in self.frames:
             self.inclusions[frame_idx] = []
             self.undo_stack[frame_idx] = []
+            self.disabled_droplets[frame_idx] = set()
             frame_data = self.visualization_data[frame_idx]
 
             if "inclusion_masks" in frame_data:
@@ -225,6 +227,29 @@ class InclusionEditor(BaseWindow):
                         for i in range(1, num_labels):
                             cx, cy = centroids[i]
                             self.inclusions[frame_idx].append((int(cx), int(cy)))
+
+    def get_droplet_at(self, x, y):
+        """Get droplet index at position, or None if not found."""
+        frame_idx = self.frames[self.current_index]
+        frame_data = self.visualization_data[frame_idx]
+
+        for i, droplet_info in enumerate(frame_data.get("droplet_masks", [])):
+            cx, cy = droplet_info["center"]
+            radius = droplet_info["radius"]
+            dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+            if dist <= radius:
+                return i
+        return None
+
+    def toggle_droplet(self, droplet_idx):
+        """Toggle droplet enabled/disabled state."""
+        frame_idx = self.frames[self.current_index]
+        if droplet_idx in self.disabled_droplets[frame_idx]:
+            self.disabled_droplets[frame_idx].remove(droplet_idx)
+            print(f"Enabled droplet {droplet_idx}")
+        else:
+            self.disabled_droplets[frame_idx].add(droplet_idx)
+            print(f"Disabled droplet {droplet_idx}")
 
     def add_inclusion(self, x, y):
         """Add inclusion at position with undo tracking."""
@@ -289,11 +314,17 @@ class InclusionEditor(BaseWindow):
 
         # Draw droplet boundaries
         if self.show_droplets:
-            for droplet_info in frame_data.get("droplet_masks", []):
+            for i, droplet_info in enumerate(frame_data.get("droplet_masks", [])):
                 cx, cy = droplet_info["center"]
                 radius = int(droplet_info["radius"])
-                cv2.circle(display, (int(cx), int(cy)), radius, (0, 255, 0), 2)
-                cv2.circle(display, (int(cx), int(cy)), 3, (0, 255, 0), -1)
+                is_disabled = i in self.disabled_droplets[frame_idx]
+                color = (128, 128, 128) if is_disabled else (0, 255, 0)
+                thickness = 1 if is_disabled else 2
+                cv2.circle(display, (int(cx), int(cy)), radius, color, thickness)
+                cv2.circle(display, (int(cx), int(cy)), 3, color, -1)
+                if is_disabled:
+                    cv2.putText(display, "X", (int(cx) - 8, int(cy) + 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
 
         # Draw inclusions
         for x, y in self.inclusions[frame_idx]:
@@ -303,13 +334,14 @@ class InclusionEditor(BaseWindow):
 
         # Status bar
         total_droplets = len(frame_data.get("droplet_masks", []))
+        active_droplets = total_droplets - len(self.disabled_droplets[frame_idx])
         count = len(self.inclusions[frame_idx])
-        status = f"Frame {frame_idx} | Droplets: {total_droplets} | Inclusions: {count}"
+        status = f"Frame {frame_idx} | Droplets: {active_droplets}/{total_droplets} | Inclusions: {count}"
         cv2.putText(
             display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
 
-        hint = "Left: Add | Right: Remove | u: Undo | c: Clear | d: Droplets | Arrows: Nav | q: Exit"
+        hint = "Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | q: Exit"
         cv2.putText(
             display,
             hint,
@@ -324,10 +356,19 @@ class InclusionEditor(BaseWindow):
 
     def update_results_with_inclusions(self):
         """Update results with correct per-droplet inclusion counts."""
+        # Filter out disabled droplets
+        filtered_results = []
+
         for row in self.results_data:
             frame_idx = row["frame"]
-            droplet_inclusions = 0
+            droplet_id = row["droplet_id"]
 
+            # Skip disabled droplets
+            if droplet_id in self.disabled_droplets.get(frame_idx, set()):
+                continue
+
+            # Count inclusions for this droplet
+            droplet_inclusions = 0
             if frame_idx in self.inclusions:
                 cx, cy = row["center_x"], row["center_y"]
                 radius = row["diameter_px"] / 2
@@ -339,13 +380,14 @@ class InclusionEditor(BaseWindow):
 
             row["inclusions"] = droplet_inclusions
             row["detected"] = False
+            filtered_results.append(row)
 
-        return self.results_data
+        return filtered_results
 
     def run(self):
         """Run interactive editor."""
         print("\nINTERACTIVE INCLUSION EDITOR")
-        print("Left: Add | Right: Remove | u: Undo | c: Clear | d: Droplets | q: Exit\n")
+        print("Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | q: Exit\n")
 
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
@@ -378,6 +420,10 @@ class InclusionEditor(BaseWindow):
             elif key == ord("d"):
                 self.show_droplets = not self.show_droplets
                 print(f"Droplet visibility: {'ON' if self.show_droplets else 'OFF'}")
+            elif key == ord("s"):
+                droplet_idx = self.get_droplet_at(*self.mouse_pos)
+                if droplet_idx is not None:
+                    self.toggle_droplet(droplet_idx)
             elif key == ord("q") or key == 27:
                 break
             elif key == 83 or key == ord(" "):
