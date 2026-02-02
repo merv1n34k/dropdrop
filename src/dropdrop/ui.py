@@ -203,6 +203,7 @@ class InclusionEditor(BaseWindow):
         self.inclusions = {}
         self.right_mouse_down = False
         self.mouse_pos = (0, 0)
+        self.show_droplets = True
         self.initialize_inclusions()
 
     def initialize_inclusions(self):
@@ -240,25 +241,36 @@ class InclusionEditor(BaseWindow):
         return False
 
     def draw_frame(self):
-        """Draw current frame with inclusions."""
+        """Draw current frame with droplet masks and inclusions."""
         frame_data = self.get_current_frame_data()
         min_proj = frame_data["min_projection"]
         frame_idx = self.frames[self.current_index]
 
         display = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
 
+        # Draw droplet boundaries
+        if self.show_droplets:
+            for droplet_info in frame_data.get("droplet_masks", []):
+                cx, cy = droplet_info["center"]
+                radius = int(droplet_info["radius"])
+                cv2.circle(display, (int(cx), int(cy)), radius, (0, 255, 0), 2)
+                cv2.circle(display, (int(cx), int(cy)), 3, (0, 255, 0), -1)
+
+        # Draw inclusions
         for x, y in self.inclusions[frame_idx]:
             overlay = display.copy()
             cv2.circle(overlay, (x, y), 7, (0, 0, 255), -1)
             display = cv2.addWeighted(display, 0.5, overlay, 0.5, 0)
 
+        # Status bar
+        total_droplets = len(frame_data.get("droplet_masks", []))
         count = len(self.inclusions[frame_idx])
-        status = f"Frame {frame_idx} | Inclusions: {count}"
+        status = f"Frame {frame_idx} | Droplets: {total_droplets} | Inclusions: {count}"
         cv2.putText(
             display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
 
-        hint = "Left: Add | Right(hold): Remove | c: Clear all | Arrows: Navigate | q/Esc: Exit"
+        hint = "Left: Add | Right: Remove | d: Toggle droplets | c: Clear | Arrows: Nav | q: Exit"
         cv2.putText(
             display,
             hint,
@@ -328,6 +340,9 @@ class InclusionEditor(BaseWindow):
                 count = len(self.inclusions[frame_idx])
                 self.inclusions[frame_idx] = []
                 print(f"Cleared {count} inclusions from frame {frame_idx}")
+            elif key == ord("d"):
+                self.show_droplets = not self.show_droplets
+                print(f"Droplet visibility: {'ON' if self.show_droplets else 'OFF'}")
             elif key == ord("q") or key == 27:
                 break
             elif key == 83 or key == ord(" "):
