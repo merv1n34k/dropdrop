@@ -115,11 +115,11 @@ class DropletStatistics:
         )
 
         if p_value is not None:
-            result_text = f"χ² = {chi2:.2f}, p = {p_value:.4f}"
+            result_text = f"X2 = {chi2:.2f}, p = {p_value:.4f}"
             if p_value > 0.05:
-                result_text += "\n✓ Follows Poisson"
+                result_text += "\nFollows Poisson"
             else:
-                result_text += "\n✗ Deviates from Poisson"
+                result_text += "\nDeviates from Poisson"
             ax.text(
                 0.98,
                 0.85,
@@ -242,8 +242,8 @@ class DropletStatistics:
             )
 
             if stats_data.get("p_value") is not None:
-                result_text = f"χ² = {stats_data['chi2']:.2f}, p = {stats_data['p_value']:.4f}"
-                result_text += "\n✓ Follows Poisson" if stats_data["p_value"] > 0.05 else "\n✗ Deviates"
+                result_text = f"X2 = {stats_data['chi2']:.2f}, p = {stats_data['p_value']:.4f}"
+                result_text += "\nFollows Poisson" if stats_data["p_value"] > 0.05 else "\nDeviates"
                 ax_poisson.text(
                     0.98, 0.85, result_text, transform=ax_poisson.transAxes,
                     ha="right", va="top", fontsize=10,
