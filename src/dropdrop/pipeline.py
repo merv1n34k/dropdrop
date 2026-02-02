@@ -17,18 +17,21 @@ from .config import load_config
 class DropletInclusionPipeline:
     """Main pipeline for droplet and inclusion detection."""
 
-    def __init__(self, config=None, store_visualizations=False, use_cache=True):
+    def __init__(self, config=None, store_visualizations=False, use_cache=True, sample_count=3):
         """Initialize pipeline with configuration.
 
         Args:
             config: Configuration dict. If None, loads from config.json.
             store_visualizations: Whether to store visualization data for UI.
             use_cache: Whether to use caching for expensive computations.
+            sample_count: Number of sample frames to store for report (default 3).
         """
         self.config = config if config else load_config()
         self.results_data = []
         self.store_visualizations = store_visualizations
         self.visualization_data = {} if store_visualizations else None
+        self.sample_count = sample_count
+        self.sample_frames = {}  # Always store a few samples for report
         self.use_cache = use_cache
         self.cache = CacheManager(self.config) if use_cache else None
         self._cellpose_model = None
@@ -239,7 +242,11 @@ class DropletInclusionPipeline:
 
     def process_frame(self, frame_idx, min_projection, droplet_coords=None):
         """Process a single frame for droplets and inclusions."""
-        if self.store_visualizations:
+        # Determine if we need to store viz data (for UI or sample)
+        is_sample = hasattr(self, "_sample_indices") and frame_idx in self._sample_indices
+        store_viz = self.store_visualizations or is_sample
+
+        if store_viz:
             frame_viz = {
                 "min_projection": min_projection,
                 "droplet_masks": [],
@@ -253,8 +260,11 @@ class DropletInclusionPipeline:
 
         if not droplet_coords:
             print(f"  Frame {frame_idx}: No droplets detected")
-            if self.store_visualizations:
-                self.visualization_data[frame_idx] = frame_viz
+            if store_viz:
+                if self.store_visualizations:
+                    self.visualization_data[frame_idx] = frame_viz
+                if is_sample:
+                    self.sample_frames[frame_idx] = frame_viz
             return
 
         valid_droplet_idx = 0
@@ -289,7 +299,7 @@ class DropletInclusionPipeline:
             if np.sum(eroded_mask) == 0:
                 continue
 
-            if self.store_visualizations:
+            if store_viz:
                 inclusion_mask, inclusion_count, blackhat = (
                     self.detect_inclusions_in_droplet(
                         min_projection, eroded_mask, store_masked=True
@@ -301,7 +311,7 @@ class DropletInclusionPipeline:
                     min_projection, eroded_mask
                 )
 
-            if self.store_visualizations:
+            if store_viz:
                 frame_viz["droplet_masks"].append({
                     "mask": droplet_mask,
                     "center": (cx, cy),
@@ -325,8 +335,11 @@ class DropletInclusionPipeline:
 
             valid_droplet_idx += 1
 
-        if self.store_visualizations:
-            self.visualization_data[frame_idx] = frame_viz
+        if store_viz:
+            if self.store_visualizations:
+                self.visualization_data[frame_idx] = frame_viz
+            if is_sample:
+                self.sample_frames[frame_idx] = frame_viz
 
         frame_data = [d for d in self.results_data if d["frame"] == frame_idx]
         total_inclusions = sum(d["inclusions"] for d in frame_data)
@@ -355,6 +368,11 @@ class DropletInclusionPipeline:
         print(
             f"Found {len(frame_groups)} frames total, processing {len(frame_indices)} frames\n"
         )
+
+        # Select sample frames for report (random subset)
+        import random
+        n_samples = min(self.sample_count, len(frame_indices))
+        self._sample_indices = set(random.sample(frame_indices, n_samples))
 
         cache_hits = 0
         for frame_idx in tqdm(frame_indices, desc="Processing frames"):

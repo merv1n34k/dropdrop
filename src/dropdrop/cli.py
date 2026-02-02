@@ -229,8 +229,22 @@ def main():
         # Always generate statistics (after any interactive corrections)
         print("\nGenerating statistical analysis...")
         csv_path = output_dir / "data.csv"
+
+        # Extract sample frames for report (always available from pipeline)
+        sample_frames = None
+        if pipeline.sample_frames:
+            sample_frames = []
+            for idx in sorted(pipeline.sample_frames.keys()):
+                viz = pipeline.sample_frames[idx]
+                sample_frames.append({
+                    "frame_idx": idx,
+                    "image": viz["min_projection"],
+                    "droplet_masks": viz.get("droplet_masks", []),
+                    "inclusion_masks": viz.get("inclusion_masks", []),
+                })
+
         stats_module = DropletStatistics(csv_path, settings)
-        stats_module.run_analysis(str(output_dir))
+        stats_module.run_analysis(str(output_dir), sample_frames)
 
         # Launch viewer if requested (no editing, just viewing)
         if args.view and pipeline.visualization_data:

@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -173,7 +174,180 @@ class DropletStatistics:
         chi2, p_value = stats.chisquare(observed_filtered, expected_filtered)
         return chi2, p_value
 
-    def run_analysis(self, output_dir):
+    def create_report(self, output_path, stats_data, sample_frames=None):
+        """Create combined report image with plots, stats, and sample frames.
+
+        Args:
+            output_path: Path object for output directory.
+            stats_data: Dict with mean_d, median_d, std_d, lambda_val, chi2, p_value.
+            sample_frames: Optional list of dicts with 'frame_idx', 'image', 'droplet_masks'.
+        """
+        n_samples = len(sample_frames) if sample_frames else 0
+
+        if self.use_poisson:
+            # 2 rows: [size_dist, poisson, stats] + [sample frames]
+            n_cols = max(3, n_samples)
+            fig = plt.figure(figsize=(5 * n_cols, 10))
+            gs = fig.add_gridspec(2, n_cols, height_ratios=[1, 1])
+            ax_size = fig.add_subplot(gs[0, 0])
+            ax_poisson = fig.add_subplot(gs[0, 1])
+            ax_stats = fig.add_subplot(gs[0, 2])
+        else:
+            # 2 rows: [size_dist, stats] + [sample frames]
+            n_cols = max(2, n_samples)
+            fig = plt.figure(figsize=(5 * n_cols, 10))
+            gs = fig.add_gridspec(2, n_cols, height_ratios=[1, 1])
+            ax_size = fig.add_subplot(gs[0, 0])
+            ax_stats = fig.add_subplot(gs[0, 1])
+            ax_poisson = None
+
+        # Plot 1: Size distribution
+        diameters = self.df["diameter_um"].values
+        ax_size.hist(diameters, bins=25, color="steelblue", edgecolor="black", alpha=0.7)
+        ax_size.axvline(
+            stats_data["mean_d"], color="red", linestyle="--",
+            label=f"Mean: {stats_data['mean_d']:.1f}"
+        )
+        ax_size.axvline(
+            stats_data["median_d"], color="green", linestyle="--",
+            label=f"Median: {stats_data['median_d']:.1f}"
+        )
+        ax_size.set_xlabel("Diameter (µm)")
+        ax_size.set_ylabel("Count")
+        ax_size.set_title("Droplet Size Distribution")
+        ax_size.legend()
+        ax_size.grid(True, alpha=0.3)
+
+        # Plot 2: Poisson comparison (if enabled)
+        if ax_poisson is not None and stats_data.get("lambda_val") is not None:
+            median_d = self.df["diameter_um"].median()
+            x_range, theoretical, lambda_val = self.calculate_poisson(median_d)
+            actual = self.df["inclusions"].value_counts().sort_index()
+            n_droplets = len(self.df)
+
+            detected_pct = []
+            theoretical_pct = theoretical * 100
+            for i in x_range:
+                detected_pct.append(actual.get(i, 0) / n_droplets * 100)
+
+            x = np.arange(len(x_range))
+            width = 0.35
+            ax_poisson.bar(
+                x - width / 2, detected_pct, width,
+                label="Detected", color="royalblue", alpha=0.8
+            )
+            ax_poisson.bar(
+                x + width / 2, theoretical_pct[:len(x)], width,
+                label=f"Poisson (λ={lambda_val:.3f})", color="coral", alpha=0.8
+            )
+
+            if stats_data.get("p_value") is not None:
+                result_text = f"χ² = {stats_data['chi2']:.2f}, p = {stats_data['p_value']:.4f}"
+                result_text += "\n✓ Follows Poisson" if stats_data["p_value"] > 0.05 else "\n✗ Deviates"
+                ax_poisson.text(
+                    0.98, 0.85, result_text, transform=ax_poisson.transAxes,
+                    ha="right", va="top", fontsize=10,
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8)
+                )
+
+            ax_poisson.set_xlabel("Inclusions per Droplet")
+            ax_poisson.set_ylabel("Percentage (%)")
+            ax_poisson.set_title("Inclusion Distribution")
+            ax_poisson.set_xticks(x)
+            ax_poisson.set_xticklabels(x_range)
+            ax_poisson.legend()
+            ax_poisson.grid(True, alpha=0.3, axis="y")
+
+        # Stats text box
+        total_droplets = len(self.df)
+        total_inclusions = int(self.df["inclusions"].sum())
+        with_inclusions = int((self.df["inclusions"] > 0).sum())
+
+        project_name = output_path.name
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        total_frames = self.df["frame"].nunique()
+
+        stats_lines = [
+            f"Project: {project_name}",
+            f"Date: {timestamp}",
+            f"Frames: {total_frames}",
+            "",
+            f"Droplets: {total_droplets:,}",
+            f"Inclusions: {total_inclusions:,}",
+            f"Mean/droplet: {total_inclusions / total_droplets:.2f}",
+            f"With incl: {with_inclusions / total_droplets * 100:.1f}%",
+            "",
+            f"Diameter: {stats_data['mean_d']:.1f} ± {stats_data['std_d']:.1f} µm",
+        ]
+
+        if self.use_poisson and stats_data.get("lambda_val") is not None:
+            stats_lines.extend([
+                "",
+                f"Dilution: {self.dilution}x",
+                f"λ theoretical: {stats_data['lambda_val']:.4f}",
+            ])
+            if stats_data.get("p_value") is not None:
+                result = "FOLLOWS" if stats_data["p_value"] > 0.05 else "DEVIATES"
+                stats_lines.append(f"Result: {result} Poisson")
+
+        ax_stats.axis("off")
+        ax_stats.text(
+            0.1, 0.95, "\n".join(stats_lines), transform=ax_stats.transAxes,
+            fontsize=11, verticalalignment="top", fontfamily="monospace",
+            bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.3)
+        )
+        ax_stats.set_title("Summary")
+
+        # Sample frames (bottom row)
+        if sample_frames:
+            for i, sample in enumerate(sample_frames[:n_cols]):
+                ax_sample = fig.add_subplot(gs[1, i])
+                self._draw_sample_frame(ax_sample, sample)
+
+        plt.suptitle("DropDrop Analysis Report", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(output_path / "report.png", dpi=200, bbox_inches="tight")
+        plt.close()
+
+    def _draw_sample_frame(self, ax, sample):
+        """Draw a sample frame with detection overlay."""
+        frame_idx = sample["frame_idx"]
+        image = sample["image"]
+        droplet_masks = sample.get("droplet_masks", [])
+        inclusion_masks = sample.get("inclusion_masks", [])
+
+        # Convert grayscale to RGB for colored overlay
+        if len(image.shape) == 2:
+            display = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        else:
+            display = image.copy()
+
+        # Draw droplet contours in green
+        for droplet in droplet_masks:
+            mask = droplet.get("mask")
+            if mask is not None:
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(display, contours, -1, (0, 255, 0), 2)
+                # Draw inclusion count
+                center = droplet.get("center")
+                count = droplet.get("inclusions", 0)
+                if center:
+                    cv2.putText(
+                        display, str(count), (int(center[0]) - 10, int(center[1]) + 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2
+                    )
+
+        # Draw inclusion masks in red
+        for inc_mask in inclusion_masks:
+            if inc_mask is not None:
+                contours, _ = cv2.findContours(inc_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(display, contours, -1, (255, 0, 0), -1)
+
+        ax.imshow(display)
+        ax.set_title(f"Frame {frame_idx}")
+        ax.axis("off")
+
+    def run_analysis(self, output_dir, sample_frames=None):
         """Run analysis and print results."""
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
@@ -201,6 +375,17 @@ class DropletStatistics:
             chi2=chi2,
             p_value=p_value,
         )
+
+        # Create combined report
+        stats_data = {
+            "mean_d": mean_d,
+            "median_d": median_d,
+            "std_d": std_d,
+            "lambda_val": lambda_val,
+            "chi2": chi2,
+            "p_value": p_value,
+        }
+        self.create_report(output_path, stats_data, sample_frames)
 
         print("\nSTATISTICAL SUMMARY")
         print("-" * 40)
