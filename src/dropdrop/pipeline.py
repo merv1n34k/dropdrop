@@ -13,13 +13,6 @@ from tqdm import tqdm
 from .cache import CacheManager
 from .config import load_config
 
-# Required: Cellpose
-try:
-    from cellpose.models import CellposeModel
-except ImportError:
-    print("You need to have cellpose for this pipeline to work!")
-    sys.exit(1)
-
 
 class DropletInclusionPipeline:
     """Main pipeline for droplet and inclusion detection."""
@@ -38,6 +31,7 @@ class DropletInclusionPipeline:
         self.visualization_data = {} if store_visualizations else None
         self.use_cache = use_cache
         self.cache = CacheManager(self.config) if use_cache else None
+        self._cellpose_model = None
 
     def parse_filename(self, filename):
         """Extract z-stack index and frame index from filename.
@@ -107,9 +101,17 @@ class DropletInclusionPipeline:
 
     def detect_droplets_cellpose(self, image):
         """Detect droplets using Cellpose."""
-        model = CellposeModel(gpu=True)
+        # Lazy import and model caching
+        if self._cellpose_model is None:
+            try:
+                from cellpose.models import CellposeModel
+            except ImportError:
+                print("ERROR: Cellpose is required for droplet detection.")
+                print("Install with: pip install cellpose")
+                sys.exit(1)
+            self._cellpose_model = CellposeModel(gpu=True)
 
-        masks, flows, styles = model.eval(
+        masks, flows, styles = self._cellpose_model.eval(
             image,
             normalize=True,
             flow_threshold=self.config["cellpose_flow_threshold"],
