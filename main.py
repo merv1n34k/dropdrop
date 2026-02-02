@@ -15,6 +15,9 @@ from scipy import stats
 import re
 from datetime import datetime
 import json
+import hashlib
+import shutil
+import tarfile
 import seaborn as sns
 import matplotlib.pyplot as plt
 
@@ -31,15 +34,238 @@ except ImportError:
     sys.exit(1)
 
 
+# region CacheManager
+class CacheManager:
+    """Global LRU cache for expensive computations, stored in project root."""
+
+    def __init__(self, config):
+        cache_cfg = config.get("cache", {})
+        self.enabled = cache_cfg.get("enabled", True)
+        self.max_frames = cache_cfg.get("max_frames", 100)
+        # Cache in project root (where main.py is located)
+        self.cache_dir = Path(__file__).parent / ".cache"
+        self.metadata_path = self.cache_dir / "metadata.json"
+        self.metadata = self._load_metadata()
+        self.config = config
+
+    def _load_metadata(self):
+        """Load cache metadata from disk."""
+        if self.metadata_path.exists():
+            try:
+                with open(self.metadata_path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return self._default_metadata()
+        return self._default_metadata()
+
+    def _default_metadata(self):
+        """Return default metadata structure."""
+        return {"version": "1.0", "config_hash": None, "frames": {}, "access_order": []}
+
+    def _save_metadata(self):
+        """Save cache metadata to disk."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.metadata_path, "w") as f:
+            json.dump(self.metadata, f, indent=2)
+
+    def _enforce_lru(self):
+        """Remove oldest frames if over max_frames limit."""
+        while len(self.metadata["access_order"]) > self.max_frames:
+            oldest_key = self.metadata["access_order"].pop(0)
+            cache_file = self.cache_dir / f"{oldest_key}.npz"
+            if cache_file.exists():
+                cache_file.unlink()
+            self.metadata["frames"].pop(oldest_key, None)
+
+    def get_config_hash(self):
+        """Hash detection-related config keys that affect caching."""
+        keys = [
+            "cellpose_flow_threshold",
+            "cellpose_cellprob_threshold",
+            "min_droplet_diameter",
+            "max_droplet_diameter",
+        ]
+        data = {k: self.config.get(k) for k in keys}
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+    def _get_cache_key(self, source_filename):
+        """Generate cache key from source filename (not full path)."""
+        name = Path(source_filename).stem
+        return hashlib.sha256(name.encode()).hexdigest()[:16]
+
+    def is_valid(self, source_filename):
+        """Check if cache is valid for frame by source filename."""
+        if not self.enabled:
+            return False
+        current_hash = self.get_config_hash()
+        if self.metadata.get("config_hash") != current_hash:
+            return False
+        cache_key = self._get_cache_key(source_filename)
+        cache_file = self.cache_dir / f"{cache_key}.npz"
+        return cache_file.exists()
+
+    def load_frame(self, source_filename):
+        """Load cached data by source filename and update access order."""
+        cache_key = self._get_cache_key(source_filename)
+        cache_file = self.cache_dir / f"{cache_key}.npz"
+        data = np.load(cache_file, allow_pickle=True)
+
+        # Update LRU order
+        if cache_key in self.metadata["access_order"]:
+            self.metadata["access_order"].remove(cache_key)
+        self.metadata["access_order"].append(cache_key)
+        self._save_metadata()
+
+        return {
+            "min_projection": data["min_projection"],
+            "droplet_coords": list(data["droplet_coords"]),
+        }
+
+    def save_frame(self, source_filename, min_proj, droplet_coords):
+        """Save frame data by source filename and enforce LRU limit."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = self._get_cache_key(source_filename)
+        cache_file = self.cache_dir / f"{cache_key}.npz"
+
+        np.savez(
+            cache_file,
+            min_projection=min_proj,
+            droplet_coords=np.array(droplet_coords, dtype=object),
+        )
+
+        # Update metadata
+        self.metadata["config_hash"] = self.get_config_hash()
+        self.metadata["frames"][cache_key] = {
+            "source": str(source_filename),
+            "cached_at": datetime.now().isoformat(),
+        }
+
+        # Update LRU order
+        if cache_key in self.metadata["access_order"]:
+            self.metadata["access_order"].remove(cache_key)
+        self.metadata["access_order"].append(cache_key)
+
+        self._enforce_lru()
+        self._save_metadata()
+
+    def clear(self):
+        """Clear entire cache."""
+        if self.cache_dir.exists():
+            shutil.rmtree(self.cache_dir)
+        self.metadata = self._default_metadata()
+        print("Cache cleared.")
+
+
+# endregion
+
+
+# region Settings and CLI helpers
+def parse_settings(settings_str):
+    """Parse compact settings string.
+
+    Format: key=value,key=value
+    Keys: d[ilution], p[oisson], c[ount], l[abel]
+
+    Examples:
+        "d=1000,p=on,c=6.5e5,l=experiment1"
+        "dilution=500,poisson=off"
+    """
+    settings = {
+        "dilution": 500,
+        "poisson": True,
+        "count": 6.5e5,
+        "label": None,
+    }
+
+    if not settings_str:
+        return settings
+
+    key_map = {
+        "d": "dilution",
+        "dilution": "dilution",
+        "p": "poisson",
+        "poisson": "poisson",
+        "c": "count",
+        "count": "count",
+        "l": "label",
+        "label": "label",
+    }
+
+    for part in settings_str.split(","):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key_map.get(key.strip().lower(), key.strip().lower())
+
+        if key == "dilution":
+            settings["dilution"] = int(value)
+        elif key == "poisson":
+            settings["poisson"] = value.lower() in ("on", "yes", "true", "1")
+        elif key == "count":
+            settings["count"] = float(value)
+        elif key == "label":
+            settings["label"] = value.strip()
+
+    return settings
+
+
+def prompt_settings():
+    """Interactive prompts for settings when --settings not provided."""
+    settings = {"dilution": 500, "poisson": True, "count": 6.5e5, "label": None}
+
+    print("\n--- Project Settings ---")
+
+    # Poisson analysis
+    use_poisson = input("Use Poisson analysis? [yes/no] (yes): ").strip().lower()
+    settings["poisson"] = use_poisson != "no"
+
+    if settings["poisson"]:
+        # Bead count
+        count_input = input("Stock count/uL [6.5e5]: ").strip()
+        if count_input:
+            try:
+                settings["count"] = float(count_input)
+            except ValueError:
+                print(f"  Invalid value, using default: {settings['count']}")
+
+        # Dilution
+        dilution_input = input("Dilution factor [500]: ").strip()
+        if dilution_input:
+            try:
+                settings["dilution"] = int(dilution_input)
+            except ValueError:
+                print(f"  Invalid value, using default: {settings['dilution']}")
+
+    # Label
+    label_input = input("Project label (optional, press Enter to skip): ").strip()
+    settings["label"] = label_input if label_input else None
+
+    print("------------------------\n")
+    return settings
+
+
+def generate_project_name(settings):
+    """Generate project directory name from date and label."""
+    date_str = datetime.now().strftime("%Y%m%d")
+    if settings.get("label"):
+        return f"{date_str}_{settings['label']}"
+    return date_str
+
+
+# endregion
+
+
 class DropletInclusionPipeline:
     """Main pipeline for droplet and inclusion detection."""
 
-    def __init__(self, store_visualizations=False):
+    def __init__(self, store_visualizations=False, use_cache=True):
         """Initialize pipeline with configuration."""
         self.config = self.load_config()
         self.results_data = []
         self.store_visualizations = store_visualizations
         self.visualization_data = {} if store_visualizations else None
+        self.use_cache = use_cache
+        self.cache = CacheManager(self.config) if use_cache else None
 
     def load_config(self):
         """Load configuration from root config.json or use defaults."""
@@ -296,8 +522,14 @@ class DropletInclusionPipeline:
 
         return filtered_mask, inclusion_count
 
-    def process_frame(self, frame_idx, min_projection):
-        """Process a single frame for droplets and inclusions."""
+    def process_frame(self, frame_idx, min_projection, droplet_coords=None):
+        """Process a single frame for droplets and inclusions.
+
+        Args:
+            frame_idx: Frame index for results tracking
+            min_projection: Min intensity projection image
+            droplet_coords: Optional pre-computed droplet coordinates (from cache)
+        """
         # Initialize frame visualization data if needed
         if self.store_visualizations:
             frame_viz = {
@@ -308,8 +540,9 @@ class DropletInclusionPipeline:
                 "masked_images": [],
             }
 
-        # Detect droplets
-        droplet_coords = self.detect_droplets_cellpose(min_projection)
+        # Detect droplets if not provided (cache miss or no cache)
+        if droplet_coords is None:
+            droplet_coords = self.detect_droplets_cellpose(min_projection)
 
         if not droplet_coords:
             print(f"  Frame {frame_idx}: No droplets detected")
@@ -433,20 +666,44 @@ class DropletInclusionPipeline:
         )
 
         # Process each frame
+        cache_hits = 0
         for frame_idx in tqdm(frame_indices, desc="Processing frames"):
-            # Create min projection
-            min_proj = self.create_min_projection(frame_groups[frame_idx])
+            z_stack_files = frame_groups[frame_idx]
+            # Use first file in z-stack as cache key (they share the same frame)
+            cache_key_file = z_stack_files[0][1].name if z_stack_files else None
 
-            if min_proj is None:
-                continue
+            # Try to load from cache
+            if self.cache and cache_key_file and self.cache.is_valid(cache_key_file):
+                cached_data = self.cache.load_frame(cache_key_file)
+                min_proj = cached_data["min_projection"]
+                droplet_coords = cached_data["droplet_coords"]
+                cache_hits += 1
+                # Process with cached data
+                self.process_frame(frame_idx, min_proj, droplet_coords)
+            else:
+                # Create min projection and detect droplets
+                min_proj = self.create_min_projection(z_stack_files)
 
-            # Process frame
-            self.process_frame(frame_idx, min_proj)
+                if min_proj is None:
+                    continue
+
+                # Detect droplets (expensive operation)
+                droplet_coords = self.detect_droplets_cellpose(min_proj)
+
+                # Save to cache
+                if self.cache and cache_key_file:
+                    self.cache.save_frame(cache_key_file, min_proj, droplet_coords)
+
+                # Process frame with freshly detected coords
+                self.process_frame(frame_idx, min_proj, droplet_coords)
+
+        if cache_hits > 0:
+            print(f"\nCache: {cache_hits}/{len(frame_indices)} frames loaded from cache")
 
         # Save results to CSV
         if self.results_data:
             df = pd.DataFrame(self.results_data)
-            csv_path = output_path / "results.csv"
+            csv_path = output_path / "data.csv"
             df.to_csv(csv_path, index=False)
             print(f"\nResults saved to: {csv_path}")
 
@@ -846,11 +1103,15 @@ class InclusionEditor(BaseWindow):
 class DropletStatistics:
     """Simplified statistical analysis for droplet detection."""
 
-    def __init__(self, results_csv):
-        """Initialize with results data."""
+    def __init__(self, results_csv, settings=None):
+        """Initialize with results data and optional settings."""
         self.df = pd.read_csv(results_csv)
-        self.bead_count = 6.5e5  # Beads per mL
-        self.dilution = 1000
+        self.settings = settings or {}
+
+        # Get Poisson parameters from settings or use defaults
+        self.bead_count = self.settings.get("count", 6.5e5)  # Beads per uL
+        self.dilution = self.settings.get("dilution", 1000)
+        self.use_poisson = self.settings.get("poisson", True)
 
     def calculate_poisson(self, median_diameter_um):
         """Calculate theoretical Poisson distribution."""
@@ -1013,16 +1274,35 @@ class DropletStatistics:
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
 
-        # Generate plots
+        # Generate size distribution plot (always)
         mean_d, median_d = self.plot_size_distribution(output_path)
-        lambda_val, chi2, p_value = self.plot_poisson_comparison(output_path)
+
+        # Generate Poisson comparison plot (if enabled)
+        lambda_val, chi2, p_value = None, None, None
+        if self.use_poisson:
+            lambda_val, chi2, p_value = self.plot_poisson_comparison(output_path)
 
         # Calculate stats
         total_droplets = len(self.df)
-        total_inclusions = self.df["inclusions"].sum()
-        with_inclusions = (self.df["inclusions"] > 0).sum()
+        total_inclusions = int(self.df["inclusions"].sum())
+        with_inclusions = int((self.df["inclusions"] > 0).sum())
+        std_d = self.df["diameter_um"].std()
 
-        # Print summary
+        # Generate summary.txt
+        self._write_summary(
+            output_path,
+            mean_d=mean_d,
+            median_d=median_d,
+            std_d=std_d,
+            total_droplets=total_droplets,
+            total_inclusions=total_inclusions,
+            with_inclusions=with_inclusions,
+            lambda_val=lambda_val,
+            chi2=chi2,
+            p_value=p_value,
+        )
+
+        # Print summary to console
         print("\nSTATISTICAL SUMMARY")
         print("-" * 40)
         print(f"Droplets: {total_droplets}")
@@ -1033,17 +1313,91 @@ class DropletStatistics:
         print(
             f"With inclusions: {with_inclusions} ({with_inclusions / total_droplets * 100:.1f}%)"
         )
-        print(f"Theoretical λ: {lambda_val:.3f}")
 
-        if p_value is not None:
-            print(f"\nChi-squared test:")
-            print(f"  χ² = {chi2:.2f}, p = {p_value:.4f}")
-            if p_value > 0.05:
-                print("  → Distribution follows Poisson (p > 0.05)")
-            else:
-                print("  → Distribution deviates from Poisson (p < 0.05)")
+        if self.use_poisson and lambda_val is not None:
+            print(f"Theoretical λ: {lambda_val:.3f}")
 
-        print(f"\nPlots saved to: {output_path}")
+            if p_value is not None:
+                print(f"\nChi-squared test:")
+                print(f"  χ² = {chi2:.2f}, p = {p_value:.4f}")
+                if p_value > 0.05:
+                    print("  → Distribution follows Poisson (p > 0.05)")
+                else:
+                    print("  → Distribution deviates from Poisson (p < 0.05)")
+
+        print(f"\nOutput saved to: {output_path}")
+
+    def _write_summary(self, output_path, **stats):
+        """Write summary.txt file with all settings and statistics."""
+        project_name = output_path.name
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        input_dir = self.settings.get("input_dir", "N/A")
+        total_frames = self.df["frame"].nunique()
+
+        lines = [
+            "=" * 80,
+            "DROPDROP ANALYSIS SUMMARY".center(80),
+            "=" * 80,
+            "",
+            f"Project: {project_name}",
+            f"Date: {timestamp}",
+            f"Input: {input_dir} ({total_frames} frames)",
+            "",
+            "SETTINGS",
+            "-" * 40,
+            f"Poisson Analysis: {'ON' if self.use_poisson else 'OFF'}",
+        ]
+
+        if self.use_poisson:
+            lines.extend([
+                f"Stock Concentration: {self.bead_count:.2e} beads/uL",
+                f"Dilution Factor: {self.dilution}x",
+            ])
+
+        lines.extend([
+            "",
+            "RESULTS",
+            "-" * 40,
+            f"Total Frames Processed: {total_frames}",
+            f"Total Droplets Detected: {stats['total_droplets']:,}",
+            f"Total Beads Detected: {stats['total_inclusions']:,}",
+            "",
+            "Droplet Statistics:",
+            f"  Mean Diameter: {stats['mean_d']:.1f} um",
+            f"  Median Diameter: {stats['median_d']:.1f} um",
+            f"  Std Deviation: {stats['std_d']:.1f} um",
+            "",
+            "Bead Statistics:",
+            f"  Mean per Droplet: {stats['total_inclusions'] / stats['total_droplets']:.2f}",
+            f"  Droplets with Beads: {stats['with_inclusions']} ({stats['with_inclusions'] / stats['total_droplets'] * 100:.1f}%)",
+        ])
+
+        if self.use_poisson and stats.get("lambda_val") is not None:
+            lines.extend([
+                "",
+                "POISSON ANALYSIS",
+                "-" * 40,
+                f"Theoretical Lambda: {stats['lambda_val']:.3f}",
+            ])
+
+            if stats.get("p_value") is not None:
+                result = "FOLLOWS" if stats["p_value"] > 0.05 else "DEVIATES FROM"
+                lines.extend([
+                    f"Chi-squared: {stats['chi2']:.2f}",
+                    f"P-value: {stats['p_value']:.4f}",
+                    f"Result: Distribution {result} Poisson (p {'>' if stats['p_value'] > 0.05 else '<'} 0.05)",
+                ])
+
+        lines.extend([
+            "",
+            "=" * 80,
+            "Generated by DropDrop v2.0",
+            "=" * 80,
+        ])
+
+        summary_path = output_path / "summary.txt"
+        with open(summary_path, "w") as f:
+            f.write("\n".join(lines))
 
 
 def main():
@@ -1056,7 +1410,21 @@ def main():
         "input_dir", type=str, help="Input directory containing z-stack images"
     )
 
-    parser.add_argument("output_dir", type=str, help="Output directory for results")
+    parser.add_argument(
+        "output_dir",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Output directory (default: ./results/<date>_<label>)",
+    )
+
+    parser.add_argument(
+        "-s",
+        "--settings",
+        type=str,
+        default=None,
+        help='Compact settings: "d=1000,p=on,c=6.5e5,l=label" (d=dilution, p=poisson, c=count, l=label)',
+    )
 
     viewer_group = parser.add_mutually_exclusive_group()
     viewer_group.add_argument(
@@ -1070,14 +1438,27 @@ def main():
     )
 
     parser.add_argument(
-        "--stats", action="store_true", help="Generate statistical analysis and plots"
-    )
-    parser.add_argument(
         "-n",
         "--number",
         type=int,
         default=None,
         help="Process only the first N frames (for testing)",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable caching for this run",
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear cache before processing",
+    )
+    parser.add_argument(
+        "-z",
+        "--gzip",
+        action="store_true",
+        help="Archive project directory as .tar.gz after completion",
     )
     args = parser.parse_args()
 
@@ -1086,18 +1467,42 @@ def main():
         print(f"ERROR: Input directory '{args.input_dir}' does not exist")
         sys.exit(1)
 
+    # Get settings (from --settings or interactive prompts)
+    if args.settings:
+        settings = parse_settings(args.settings)
+    else:
+        settings = prompt_settings()
+
+    # Determine output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        project_name = generate_project_name(settings)
+        output_dir = Path("results") / project_name
+
+    # Store settings for later use
+    settings["input_dir"] = str(Path(args.input_dir).resolve())
+
     # Initialize and run pipeline
     print(f"Input directory: {args.input_dir}")
-    print(f"Output directory: {args.output_dir}")
+    print(f"Output directory: {output_dir}")
+    if settings["poisson"]:
+        print(f"Poisson: ON (count={settings['count']:.2e}, dilution={settings['dilution']})")
+    else:
+        print("Poisson: OFF")
     if args.number:
         print(f"Frame limit: {args.number}")
 
     # Create pipeline with visualization storage if viewer is requested
-    store_viz = False
-    if args.view or args.interactive:
-        store_viz = True
-    pipeline = DropletInclusionPipeline(store_visualizations=store_viz)
-    results = pipeline.run(args.input_dir, args.output_dir, frame_limit=args.number)
+    store_viz = args.view or args.interactive
+    use_cache = not args.no_cache
+    pipeline = DropletInclusionPipeline(store_visualizations=store_viz, use_cache=use_cache)
+
+    # Handle cache clear request
+    if args.clear_cache and pipeline.cache:
+        pipeline.cache.clear()
+
+    results = pipeline.run(args.input_dir, str(output_dir), frame_limit=args.number)
 
     if results:
         print("\nPipeline completed successfully!")
@@ -1110,16 +1515,15 @@ def main():
 
             # Save updated results
             df = pd.DataFrame(results)
-            csv_path = Path(args.output_dir) / "results.csv"
+            csv_path = output_dir / "data.csv"
             df.to_csv(csv_path, index=False)
             print(f"Updated results saved to: {csv_path}")
 
-        # Generate statistics (after any interactive corrections)
-        if args.stats:
-            print("\nGenerating statistical analysis...")
-            csv_path = Path(args.output_dir) / "results.csv"
-            stats_module = DropletStatistics(csv_path)
-            stats_module.run_analysis(args.output_dir)
+        # Always generate statistics (after any interactive corrections)
+        print("\nGenerating statistical analysis...")
+        csv_path = output_dir / "data.csv"
+        stats_module = DropletStatistics(csv_path, settings)
+        stats_module.run_analysis(str(output_dir))
 
         # Launch viewer if requested (no editing, just viewing)
         if args.view and pipeline.visualization_data:
@@ -1127,6 +1531,14 @@ def main():
             df = pd.DataFrame(results)
             viewer = Viewer(pipeline.visualization_data, df)
             viewer.run()
+
+        # Archive project if requested
+        if args.gzip:
+            archive_name = f"{output_dir}.tar.gz"
+            print(f"\nArchiving project to: {archive_name}")
+            with tarfile.open(archive_name, "w:gz") as tar:
+                tar.add(output_dir, arcname=output_dir.name)
+            print(f"Archive created: {archive_name}")
 
 
 if __name__ == "__main__":
