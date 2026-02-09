@@ -433,11 +433,6 @@ class Editor(BaseWindow):
                     self.current_index = (self.current_index + 1) % len(self.frames)
                 elif key in (81, 63234, 65361, 2424832):
                     self.current_index = (self.current_index - 1) % len(self.frames)
-                elif key == 13:
-                    if self.current_index < len(self.frames) - 1:
-                        self.current_index += 1
-                    else:
-                        break
         except KeyboardInterrupt:
             print("\nEditor interrupted, applying current edits...")
 

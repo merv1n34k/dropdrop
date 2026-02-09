@@ -16,10 +16,14 @@ from .ui import Editor
 QUEUE_FILE = "queue.tmp"
 
 
-def prompt_settings(config=None):
+def prompt_settings(config=None, skip_label=False):
     """Interactive prompts for project settings.
 
     Defaults are loaded from config.json 'settings' section.
+
+    Args:
+        config: Configuration dict. If None, loads from config.json.
+        skip_label: If True, skip label prompt (used in multiplex mode).
     """
     if config is None:
         config = load_config()
@@ -68,9 +72,10 @@ def prompt_settings(config=None):
             except ValueError:
                 print(f"  Invalid value, using default: {settings['dilution']}")
 
-    # Label
-    label_input = input("Project label (optional, press Enter to skip): ").strip()
-    settings["label"] = label_input if label_input else None
+    # Label (skip in multiplex mode where labels are assigned per directory)
+    if not skip_label:
+        label_input = input("Project label (optional, press Enter to skip): ").strip()
+        settings["label"] = label_input if label_input else None
 
     print("------------------------\n")
     return settings
@@ -202,14 +207,6 @@ def process_single_directory(input_dir, output_dir, settings, args, cellpose_mod
         stats_module = DropletStatistics(csv_path, settings)
         stats_module.run_analysis(str(output_dir), sample_frames)
 
-        # Archive project if requested
-        if args.gzip:
-            archive_name = f"{output_dir}.tar.gz"
-            print(f"\nArchiving project to: {archive_name}")
-            with tarfile.open(archive_name, "w:gz") as tar:
-                tar.add(output_dir, arcname=output_dir.name)
-            print(f"Archive created: {archive_name}")
-
     return pipeline._cellpose_model
 
 
@@ -224,6 +221,7 @@ def process_queue(queue, settings, args):
 
     print(f"\nProcessing {len(pending)} directories...")
     cellpose_model = None
+    output_dirs = []
 
     for i, entry in pending:
         label = entry["label"]
@@ -235,6 +233,7 @@ def process_queue(queue, settings, args):
         run_settings["input_dir"] = str(Path(input_dir).resolve())
 
         output_dir = Path("results") / generate_project_name(run_settings)
+        output_dirs.append(output_dir)
 
         print(f"\n{'='*60}")
         print(f"[{i+1}/{len(queue)}] {Path(input_dir).name} -> {label}")
@@ -250,6 +249,17 @@ def process_queue(queue, settings, args):
 
     cleanup_queue()
     print(f"\nAll {len(pending)} directories processed.")
+
+    # Archive all output directories in a single archive
+    if args.gzip and output_dirs:
+        date_str = datetime.now().strftime("%Y%m%d")
+        archive_name = f"results/{date_str}_multiplex.tar.gz"
+        print(f"\nArchiving all directories to: {archive_name}")
+        with tarfile.open(archive_name, "w:gz") as tar:
+            for output_dir in output_dirs:
+                if output_dir.exists():
+                    tar.add(output_dir, arcname=output_dir.name)
+        print(f"Archive created: {archive_name}")
 
 
 def main():
@@ -339,7 +349,7 @@ def main():
         pending_count = sum(1 for e in queue if e["status"] == "pending")
         print(f"Resuming from {QUEUE_FILE}: {pending_count}/{len(queue)} pending")
 
-        settings = prompt_settings()
+        settings = prompt_settings(skip_label=True)
         process_queue(queue, settings, args)
         return
 
@@ -357,7 +367,7 @@ def main():
         write_queue(queue)
         print(f"\nQueue saved to {QUEUE_FILE} ({len(queue)} entries)")
 
-        settings = prompt_settings()
+        settings = prompt_settings(skip_label=True)
         process_queue(queue, settings, args)
         return
 
@@ -389,6 +399,14 @@ def main():
         print(f"Frame limit: {args.number}")
 
     process_single_directory(args.input_dir, output_dir, settings, args)
+
+    # Archive single directory
+    if args.gzip and output_dir.exists():
+        archive_name = f"{output_dir}.tar.gz"
+        print(f"\nArchiving project to: {archive_name}")
+        with tarfile.open(archive_name, "w:gz") as tar:
+            tar.add(output_dir, arcname=output_dir.name)
+        print(f"Archive created: {archive_name}")
 
 
 if __name__ == "__main__":

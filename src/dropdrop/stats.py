@@ -338,14 +338,15 @@ class DropletStatistics:
             if mask is not None:
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 cv2.drawContours(display, contours, -1, (0, 255, 0), 2)
-                # Draw inclusion count
-                center = droplet.get("center")
-                count = droplet.get("inclusions", 0)
-                if center:
-                    cv2.putText(
-                        display, str(count), (int(center[0]) - 10, int(center[1]) + 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2
-                    )
+                # Draw inclusion count (only when inclusions enabled)
+                if self.use_inclusions:
+                    center = droplet.get("center")
+                    count = droplet.get("inclusions", 0)
+                    if center:
+                        cv2.putText(
+                            display, str(count), (int(center[0]) - 10, int(center[1]) + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2
+                        )
 
         # Draw inclusion masks in red
         for inc_mask in inclusion_masks:
