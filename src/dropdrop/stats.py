@@ -285,9 +285,12 @@ class DropletStatistics:
         else:
             stats_lines.append("Inclusions: OFF")
 
+        cv_diameter = (stats_data["std_d"] / stats_data["mean_d"] * 100) if stats_data["mean_d"] > 0 else 0
+
         stats_lines.extend([
             "",
             f"Diameter: {stats_data['mean_d']:.1f} +/- {stats_data['std_d']:.1f} um",
+            f"CV (diameter): {cv_diameter:.1f}%",
         ])
 
         if self.use_poisson and stats_data.get("lambda_val") is not None:
@@ -398,10 +401,12 @@ class DropletStatistics:
         }
         self.create_report(output_path, stats_data, sample_frames)
 
+        cv_diameter = (std_d / mean_d * 100) if mean_d > 0 else 0
+
         print("\nSTATISTICAL SUMMARY")
         print("-" * 40)
         print(f"Droplets: {total_droplets}")
-        print(f"Mean diameter: {mean_d:.1f} µm")
+        print(f"Mean diameter: {mean_d:.1f} µm (CV: {cv_diameter:.1f}%)")
 
         if self.use_inclusions:
             print(
@@ -454,6 +459,8 @@ class DropletStatistics:
                 f"Dilution Factor: {self.dilution}x",
             ])
 
+        cv_diameter = (stats["std_d"] / stats["mean_d"] * 100) if stats["mean_d"] > 0 else 0
+
         lines.extend([
             "",
             "RESULTS",
@@ -465,6 +472,7 @@ class DropletStatistics:
             f"  Mean Diameter: {stats['mean_d']:.1f} um",
             f"  Median Diameter: {stats['median_d']:.1f} um",
             f"  Std Deviation: {stats['std_d']:.1f} um",
+            f"  CV: {cv_diameter:.1f}%",
         ])
 
         if self.use_inclusions:
