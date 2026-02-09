@@ -1,6 +1,6 @@
 # DropDrop
 
-Automated Python pipeline for detecting droplets and inclusions (beads) in microscopy z-stacks using Cellpose segmentation and morphological analysis.
+Automated pipeline for detecting droplets and inclusions (beads) in microscopy z-stacks using Cellpose segmentation and morphological analysis.
 
 Tailored for the EVOS M5000 Imaging System.
 
@@ -25,47 +25,50 @@ uv pip install -e .
 ## Quick Start
 
 ```bash
-# Run with interactive prompts
+# Single directory — interactive prompts for settings
 dropdrop ./images
-
-# Run with settings
-dropdrop ./images --settings "d=1000,p=on,l=experiment1"
 
 # Process only first 5 frames (for testing)
 dropdrop ./images -n 5
+
+# With interactive editor
+dropdrop ./images -e
+
+# Multiplex mode — batch process subdirectories
+dropdrop -m ./samples
 ```
 
 ## Usage
 
-### Basic Commands
+### Single Mode
 
 ```bash
-# Run pipeline with compact settings
-dropdrop ./images --settings "d=1000,p=on,c=6.5e5,l=experiment1"
+# Basic run (prompts for settings interactively)
+dropdrop ./images
 
 # Custom output directory
-dropdrop ./images ./results/my_project --settings "d=500"
+dropdrop ./images ./results/my_project
 
-# Interactive viewer (view results after processing)
-dropdrop ./images --view
-
-# Interactive editor (manually correct inclusions)
-dropdrop ./images --interactive
-
-# Archive output as tar.gz
-dropdrop ./images -z
+# With editor and archive
+dropdrop ./images -e -z
 ```
 
-### Settings Format
+### Multiplex Mode
 
-Compact settings string: `d=dilution,p=poisson,c=count,l=label`
+Process multiple sample directories at once. Each subdirectory is labeled interactively and processed as a separate sample, then combined into a multiplexed report.
 
-| Key | Full name | Description | Default |
-|-----|-----------|-------------|---------|
-| `d` | `dilution` | Dilution factor | 500 |
-| `p` | `poisson` | Enable Poisson analysis (on/off) | on |
-| `c` | `count` | Stock bead count per uL | 6.5e5 |
-| `l` | `label` | Project label for output naming | None |
+```bash
+dropdrop -m ./samples_parent_dir
+dropdrop -m ./samples_parent_dir -z    # Archive result
+```
+
+### Resume (Resurrect)
+
+If a multiplex run is interrupted, resume from where it left off:
+
+```bash
+dropdrop -r
+```
 
 ### Cache Control
 
@@ -76,7 +79,7 @@ dropdrop ./images --clear-cache    # Clear cache before run
 
 ## Interactive Editor
 
-The editor allows manual correction of detected inclusions:
+The editor (`-e`) allows manual correction of detected inclusions:
 
 | Key | Action |
 |-----|--------|
@@ -93,24 +96,51 @@ Disabled droplets (gray with X) are excluded from the final results.
 
 ## Output Structure
 
+### Single mode
+
 ```
 results/<YYYYMMDD>_<label>/
   data.csv                  # Raw detection data
   summary.txt               # Settings and statistics
+  report.png                # Combined report with sample frames
   size_distribution.png     # Droplet diameter histogram
   poisson_comparison.png    # Bead distribution vs theoretical
+```
+
+### Multiplex mode
+
+```
+results/<YYYYMMDD>_multiplex/
+  data.csv                  # Merged data with sample column
+  summary.txt               # Per-sample statistics
+  summary_report.png        # Comparison table, overlaid plots, sample collage
+  size_distribution.png     # Overlaid diameter histograms
+  poisson_comparison.png    # Overlaid inclusion distributions
 ```
 
 ### data.csv columns
 
 | Column | Description |
 |--------|-------------|
+| `sample` | Sample label (multiplex only) |
 | `frame` | Frame index |
 | `droplet_id` | Droplet ID within frame |
 | `center_x`, `center_y` | Droplet center coordinates (px) |
 | `diameter_px`, `diameter_um` | Droplet diameter |
 | `area_px`, `area_um2` | Droplet area |
 | `inclusions` | Number of inclusions detected |
+
+## Architecture
+
+```
+CLI
+  -> Detection (per sample) -> .tmp_<label>/data.csv + sample_*.png
+  -> Analysis.run(output_dir)  -- auto-discovers .tmp_* dirs
+       1 sample  -> single report
+       2+ samples -> multiplex report
+  -> Cleanup .tmp_* dirs
+  -> Archive (optional)
+```
 
 ## Configuration
 

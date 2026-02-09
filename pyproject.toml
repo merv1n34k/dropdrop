@@ -1,8 +1,7 @@
 [project]
 name = "dropdrop"
-version = "1.4.0"
-description = """Python pipeline script for detecting droplets with beads and
-other inclusions via cellpose"""
+version = "2.0.0"
+description = "Automated pipeline for detecting droplets and inclusions in microscopy images, powered by Cellpose"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
