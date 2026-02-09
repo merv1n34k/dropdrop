@@ -3,6 +3,8 @@
 import cv2
 import numpy as np
 
+from .config import load_config
+
 
 class BaseWindow:
     """Base class for all window-based interfaces."""
@@ -13,24 +15,6 @@ class BaseWindow:
         self.current_index = 0
         self.window_name = "Window"
 
-    def navigate(self):
-        """Handle keyboard navigation - common for all windows."""
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord("q") or key == 27:  # q or ESC
-            return False
-        elif key == 83 or key == ord(" "):  # Right arrow or space
-            self.current_index = (self.current_index + 1) % len(self.frames)
-        elif key == 81:  # Left arrow
-            self.current_index = (self.current_index - 1) % len(self.frames)
-        elif key == 13:  # Enter
-            if self.current_index < len(self.frames) - 1:
-                self.current_index += 1
-            else:
-                return False
-
-        return True
-
     def get_current_frame_data(self):
         """Get current frame visualization data."""
         return self.visualization_data[self.frames[self.current_index]]
@@ -40,172 +24,37 @@ class BaseWindow:
         raise NotImplementedError
 
 
-class Viewer(BaseWindow):
-    """Interactive viewer for detection results."""
+class Editor(BaseWindow):
+    """Interactive editor for viewing and editing droplet/inclusion data."""
 
-    def __init__(self, visualization_data, results_df):
-        super().__init__(visualization_data)
-        self.df = results_df
-        self.mode = "steps"
-        self.window_name = "Droplet Detection Viewer"
+    LAYERS = [
+        "Min Projection",
+        "Cellpose Detection",
+        "Eroded Masks",
+        "Black-hat",
+        "Detected Inclusions",
+        "Overlay",
+    ]
 
-    def create_overlay(self, frame_idx):
-        """Create overlay visualization from stored data."""
-        frame_data = self.visualization_data[frame_idx]
-        min_proj = frame_data["min_projection"]
-
-        overlay = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
-
-        for i, droplet_info in enumerate(frame_data["droplet_masks"]):
-            cx, cy = droplet_info["center"]
-            radius = int(droplet_info["radius"])
-            inclusions = droplet_info["inclusions"]
-
-            color = (0, 0, 255) if inclusions > 0 else (0, 255, 0)
-            cv2.circle(overlay, (int(cx), int(cy)), radius, color, 2)
-
-            eroded_radius = radius - self.df.iloc[0].get("erosion_pixels", 10)
-            if eroded_radius > 0:
-                cv2.circle(overlay, (int(cx), int(cy)), eroded_radius, (0, 255, 255), 1)
-
-            cv2.circle(overlay, (int(cx), int(cy)), 3, (255, 0, 0), -1)
-
-            if inclusions > 0:
-                cv2.putText(
-                    overlay,
-                    str(inclusions),
-                    (int(cx) - 10, int(cy) + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 255, 255),
-                    2,
-                )
-
-        frame_df = self.df[self.df["frame"] == frame_idx]
-        total_droplets = len(frame_df)
-        total_inclusions = frame_df["inclusions"].sum()
-
-        info_text = f"Frame {frame_idx} | Droplets: {total_droplets} | Inclusions: {int(total_inclusions)}"
-        cv2.putText(
-            overlay, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
-        )
-
-        return overlay
-
-    def create_steps(self, frame_idx):
-        """Create processing steps visualization from stored data."""
-        frame_data = self.visualization_data[frame_idx]
-        min_proj = frame_data["min_projection"]
-        h, w = min_proj.shape
-
-        images = []
-
-        min_bgr = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
-        images.append(("Min Projection", min_bgr))
-
-        droplet_overlay = np.zeros((h, w, 3), dtype=np.uint8)
-        for i, mask in enumerate(frame_data["droplet_masks"]):
-            droplet_mask = mask["mask"]
-            color_val = (i * 30) % 200 + 55
-            droplet_overlay[droplet_mask > 0] = [color_val, color_val, 0]
-        images.append(("Cellpose Detection", droplet_overlay))
-
-        eroded_overlay = np.zeros((h, w, 3), dtype=np.uint8)
-        for eroded_mask in frame_data["eroded_masks"]:
-            eroded_overlay[eroded_mask > 0] = [0, 200, 200]
-        images.append(("Eroded Masks", eroded_overlay))
-
-        if "masked_images" in frame_data and frame_data["masked_images"]:
-            blackhat_combined = np.zeros((h, w), dtype=np.uint8)
-            for masked_blackhat in frame_data["masked_images"]:
-                blackhat_combined = cv2.bitwise_or(blackhat_combined, masked_blackhat)
-            blackhat_bgr = cv2.cvtColor(blackhat_combined, cv2.COLOR_GRAY2BGR)
-            images.append(("Black-hat (Masked)", blackhat_bgr))
-
-        inclusion_overlay = np.zeros((h, w, 3), dtype=np.uint8)
-        for inclusion_mask in frame_data["inclusion_masks"]:
-            inclusion_overlay[:, :, 2] = cv2.bitwise_or(
-                inclusion_overlay[:, :, 2], inclusion_mask
-            )
-        images.append(("Detected Inclusions", inclusion_overlay))
-
-        final_overlay = self.create_overlay(frame_idx)
-        images.append(("Final Result", final_overlay))
-
-        cols = 3
-        rows = 2
-        collage = np.ones((rows * h, cols * w, 3), dtype=np.uint8) * 240
-
-        for idx, (title, img) in enumerate(images[:6]):
-            row = idx // cols
-            col = idx % cols
-
-            if img.shape[:2] != (h, w):
-                img = cv2.resize(img, (w, h))
-
-            img_copy = img.copy()
-            cv2.putText(
-                img_copy, title, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2
-            )
-
-            collage[row * h : (row + 1) * h, col * w : (col + 1) * w] = img_copy
-
-        cv2.putText(
-            collage,
-            f"Frame {frame_idx}/{max(self.frames)}",
-            (10, rows * h - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 0, 0),
-            2,
-        )
-
-        return collage
-
-    def run(self):
-        """Run viewer with mode switching."""
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-
-        def mouse_callback(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN:
-                self.current_index = (self.current_index + 1) % len(self.frames)
-
-        cv2.setMouseCallback(self.window_name, mouse_callback)
-
-        while True:
-            frame_idx = self.frames[self.current_index]
-
-            if self.mode == "overlay":
-                display_img = self.create_overlay(frame_idx)
-            else:
-                display_img = self.create_steps(frame_idx)
-
-            cv2.imshow(self.window_name, display_img)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("m"):
-                self.mode = "overlay" if self.mode == "steps" else "steps"
-                continue
-
-            if not self.navigate():
-                break
-
-        cv2.destroyAllWindows()
-
-
-class InclusionEditor(BaseWindow):
-    """Interactive editor for inclusion corrections."""
-
-    def __init__(self, visualization_data, results_data):
+    def __init__(self, visualization_data, results_data, detect_inclusions=True):
         super().__init__(visualization_data)
         self.results_data = results_data
-        self.window_name = "Inclusion Editor"
+        self.window_name = "DropDrop Editor"
+        self.detect_inclusions = detect_inclusions
+        self.config = load_config()
+
+        # Mode: "edit" or "view"
+        self.mode = "edit"
+        self.view_layer = 0
+
+        # Editor state
         self.inclusions = {}
-        self.undo_stack = {}  # {frame_idx: [(action, data), ...]}
-        self.disabled_droplets = {}  # {frame_idx: set of droplet indices}
+        self.undo_stack = {}
+        self.disabled_droplets = {}
         self.right_mouse_down = False
         self.mouse_pos = (0, 0)
         self.show_droplets = True
+
         self.initialize_inclusions()
 
     def initialize_inclusions(self):
@@ -216,7 +65,7 @@ class InclusionEditor(BaseWindow):
             self.disabled_droplets[frame_idx] = set()
             frame_data = self.visualization_data[frame_idx]
 
-            if "inclusion_masks" in frame_data:
+            if self.detect_inclusions and "inclusion_masks" in frame_data:
                 for mask in frame_data["inclusion_masks"]:
                     if np.any(mask):
                         num_labels, labels, stats, centroids = (
@@ -227,6 +76,8 @@ class InclusionEditor(BaseWindow):
                         for i in range(1, num_labels):
                             cx, cy = centroids[i]
                             self.inclusions[frame_idx].append((int(cx), int(cy)))
+
+    # -- Droplet interaction --
 
     def get_droplet_at(self, x, y):
         """Get droplet index at position, or None if not found."""
@@ -250,6 +101,8 @@ class InclusionEditor(BaseWindow):
         else:
             self.disabled_droplets[frame_idx].add(droplet_idx)
             print(f"Disabled droplet {droplet_idx}")
+
+    # -- Inclusion editing --
 
     def add_inclusion(self, x, y):
         """Add inclusion at position with undo tracking."""
@@ -304,8 +157,10 @@ class InclusionEditor(BaseWindow):
             self.inclusions[frame_idx] = data
             print(f"Undo: restored {len(data)} inclusions")
 
+    # -- Display methods --
+
     def draw_frame(self):
-        """Draw current frame with droplet masks and inclusions."""
+        """Draw current frame with droplet masks and inclusions (edit mode)."""
         frame_data = self.get_current_frame_data()
         min_proj = frame_data["min_projection"]
         frame_idx = self.frames[self.current_index]
@@ -327,36 +182,140 @@ class InclusionEditor(BaseWindow):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
 
         # Draw inclusions
-        for x, y in self.inclusions[frame_idx]:
-            overlay = display.copy()
-            cv2.circle(overlay, (x, y), 7, (0, 0, 255), -1)
-            display = cv2.addWeighted(display, 0.5, overlay, 0.5, 0)
+        if self.detect_inclusions:
+            for x, y in self.inclusions[frame_idx]:
+                overlay = display.copy()
+                cv2.circle(overlay, (x, y), 7, (0, 0, 255), -1)
+                display = cv2.addWeighted(display, 0.5, overlay, 0.5, 0)
 
         # Status bar
         total_droplets = len(frame_data.get("droplet_masks", []))
         active_droplets = total_droplets - len(self.disabled_droplets[frame_idx])
-        count = len(self.inclusions[frame_idx])
-        status = f"Frame {frame_idx} | Droplets: {active_droplets}/{total_droplets} | Inclusions: {count}"
+        if self.detect_inclusions:
+            count = len(self.inclusions[frame_idx])
+            status = f"[EDIT] Frame {frame_idx} | Droplets: {active_droplets}/{total_droplets} | Inclusions: {count}"
+        else:
+            status = f"[EDIT] Frame {frame_idx} | Droplets: {active_droplets}/{total_droplets} | Inclusions: OFF"
         cv2.putText(
             display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
 
-        hint = "Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | q: Exit"
+        # Hint bar
+        if self.detect_inclusions:
+            hint = "Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | m: View | q: Exit"
+        else:
+            hint = "s: Toggle droplet | d: Droplets | m: View | q: Exit"
         cv2.putText(
-            display,
-            hint,
+            display, hint,
             (10, display.shape[0] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0),
-            1,
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
         )
 
         return display
 
+    def create_overlay(self, frame_idx):
+        """Create overlay visualization with colored droplets and inclusion counts."""
+        frame_data = self.visualization_data[frame_idx]
+        min_proj = frame_data["min_projection"]
+        erosion_px = self.config.get("erosion_pixels", 10)
+
+        overlay = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
+
+        for i, droplet_info in enumerate(frame_data.get("droplet_masks", [])):
+            cx, cy = droplet_info["center"]
+            radius = int(droplet_info["radius"])
+            is_disabled = i in self.disabled_droplets.get(frame_idx, set())
+
+            if is_disabled:
+                cv2.circle(overlay, (int(cx), int(cy)), radius, (128, 128, 128), 1)
+                continue
+
+            # Count live inclusions inside this droplet
+            inc_count = 0
+            if self.detect_inclusions:
+                for ix, iy in self.inclusions.get(frame_idx, []):
+                    dist = np.sqrt((ix - cx) ** 2 + (iy - cy) ** 2)
+                    if dist <= radius:
+                        inc_count += 1
+
+            color = (0, 0, 255) if inc_count > 0 else (0, 255, 0)
+            cv2.circle(overlay, (int(cx), int(cy)), radius, color, 2)
+
+            eroded_radius = radius - erosion_px
+            if eroded_radius > 0:
+                cv2.circle(overlay, (int(cx), int(cy)), eroded_radius, (0, 255, 255), 1)
+
+            cv2.circle(overlay, (int(cx), int(cy)), 3, (255, 0, 0), -1)
+
+            if inc_count > 0:
+                cv2.putText(
+                    overlay, str(inc_count),
+                    (int(cx) - 10, int(cy) + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2,
+                )
+
+        return overlay
+
+    def create_layer(self, frame_idx, layer_index):
+        """Render a single processing layer full-screen."""
+        frame_data = self.visualization_data[frame_idx]
+        min_proj = frame_data["min_projection"]
+        h, w = min_proj.shape
+
+        layer_name = self.LAYERS[layer_index]
+
+        if layer_name == "Min Projection":
+            img = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
+
+        elif layer_name == "Cellpose Detection":
+            img = np.zeros((h, w, 3), dtype=np.uint8)
+            for i, mask in enumerate(frame_data.get("droplet_masks", [])):
+                droplet_mask = mask["mask"]
+                color_val = (i * 30) % 200 + 55
+                img[droplet_mask > 0] = [color_val, color_val, 0]
+
+        elif layer_name == "Eroded Masks":
+            img = np.zeros((h, w, 3), dtype=np.uint8)
+            for eroded_mask in frame_data.get("eroded_masks", []):
+                img[eroded_mask > 0] = [0, 200, 200]
+
+        elif layer_name == "Black-hat":
+            blackhat_combined = np.zeros((h, w), dtype=np.uint8)
+            for masked_blackhat in frame_data.get("masked_images", []):
+                blackhat_combined = cv2.bitwise_or(blackhat_combined, masked_blackhat)
+            img = cv2.cvtColor(blackhat_combined, cv2.COLOR_GRAY2BGR)
+
+        elif layer_name == "Detected Inclusions":
+            img = np.zeros((h, w, 3), dtype=np.uint8)
+            for inclusion_mask in frame_data.get("inclusion_masks", []):
+                img[:, :, 2] = cv2.bitwise_or(img[:, :, 2], inclusion_mask)
+
+        elif layer_name == "Overlay":
+            img = self.create_overlay(frame_idx)
+
+        else:
+            img = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
+
+        # Title label
+        cv2.putText(
+            img, f"[VIEW] Frame {frame_idx} | {layer_name}",
+            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+        )
+
+        # Hint bar
+        hint = "v: Next layer | m: Edit mode | Arrow/Space: Navigate | q: Exit"
+        cv2.putText(
+            img, hint,
+            (10, img.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
+        )
+
+        return img
+
+    # -- Results --
+
     def update_results_with_inclusions(self):
         """Update results with correct per-droplet inclusion counts."""
-        # Filter out disabled droplets
         filtered_results = []
 
         for row in self.results_data:
@@ -369,7 +328,7 @@ class InclusionEditor(BaseWindow):
 
             # Count inclusions for this droplet
             droplet_inclusions = 0
-            if frame_idx in self.inclusions:
+            if self.detect_inclusions and frame_idx in self.inclusions:
                 cx, cy = row["center_x"], row["center_y"]
                 radius = row["diameter_px"] / 2
 
@@ -384,16 +343,24 @@ class InclusionEditor(BaseWindow):
 
         return filtered_results
 
+    # -- Main loop --
+
     def run(self):
-        """Run interactive editor."""
-        print("\nINTERACTIVE INCLUSION EDITOR")
-        print("Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | q: Exit\n")
+        """Run the editor."""
+        print("\nDROPDROP EDITOR")
+        if self.detect_inclusions:
+            print("Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | m: View | q: Exit\n")
+        else:
+            print("s: Toggle droplet | d: Droplets | m: View | q: Exit\n")
 
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
         def mouse_callback(event, x, y, flags, param):
             self.mouse_pos = (x, y)
-            frame_idx = self.frames[self.current_index]
+
+            # Only handle mouse editing in edit mode with inclusions enabled
+            if self.mode != "edit" or not self.detect_inclusions:
+                return
 
             if event == cv2.EVENT_LBUTTONDOWN:
                 self.add_inclusion(x, y)
@@ -408,19 +375,48 @@ class InclusionEditor(BaseWindow):
         cv2.setMouseCallback(self.window_name, mouse_callback)
 
         while True:
-            display = self.draw_frame()
+            frame_idx = self.frames[self.current_index]
+
+            if self.mode == "edit":
+                display = self.draw_frame()
+            else:
+                display = self.create_layer(frame_idx, self.view_layer)
+
             cv2.imshow(self.window_name, display)
 
             key = cv2.waitKey(30) & 0xFF
 
-            if key == ord("c"):
-                self.clear_inclusions()
-            elif key == ord("u"):
-                self.undo()
-            elif key == ord("d"):
+            # Mode switching
+            if key == ord("m"):
+                if self.mode == "edit":
+                    self.mode = "view"
+                    self.view_layer = 0
+                    print(f"View mode: {self.LAYERS[self.view_layer]}")
+                else:
+                    self.mode = "edit"
+                    print("Edit mode")
+                continue
+
+            # View mode: cycle layers
+            if key == ord("v") and self.mode == "view":
+                self.view_layer = (self.view_layer + 1) % len(self.LAYERS)
+                print(f"Layer: {self.LAYERS[self.view_layer]}")
+                continue
+
+            # Edit mode keys (inclusion editing)
+            if self.mode == "edit" and self.detect_inclusions:
+                if key == ord("c"):
+                    self.clear_inclusions()
+                    continue
+                elif key == ord("u"):
+                    self.undo()
+                    continue
+
+            # Shared keys (both modes)
+            if key == ord("d"):
                 self.show_droplets = not self.show_droplets
                 print(f"Droplet visibility: {'ON' if self.show_droplets else 'OFF'}")
-            elif key == ord("s"):
+            elif key == ord("s") and self.mode == "edit":
                 droplet_idx = self.get_droplet_at(*self.mouse_pos)
                 if droplet_idx is not None:
                     self.toggle_droplet(droplet_idx)

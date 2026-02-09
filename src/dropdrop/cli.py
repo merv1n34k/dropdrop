@@ -12,7 +12,7 @@ from .cache import CacheManager
 from .config import load_config
 from .pipeline import DropletInclusionPipeline
 from .stats import DropletStatistics
-from .ui import InclusionEditor, Viewer
+from .ui import Editor
 
 
 def parse_settings(settings_str):
@@ -145,15 +145,11 @@ def main():
         help='Compact settings: "d=1000,p=on,c=6.5e5,l=label,i=on" (d=dilution, p=poisson, c=count, l=label, i=inclusions)',
     )
 
-    viewer_group = parser.add_mutually_exclusive_group()
-    viewer_group.add_argument(
-        "--view", action="store_true", help="Enable interactive viewer after processing"
-    )
-    viewer_group.add_argument(
+    parser.add_argument(
         "-e",
         "--edit",
         action="store_true",
-        help="Interactive inclusion correction mode",
+        help="Open interactive editor/viewer",
     )
 
     parser.add_argument(
@@ -213,8 +209,8 @@ def main():
     if args.number:
         print(f"Frame limit: {args.number}")
 
-    # Create pipeline with visualization storage if viewer is requested
-    store_viz = args.view or args.edit
+    # Create pipeline with visualization storage if editor is requested
+    store_viz = args.edit
     use_cache = not args.no_cache
     detect_inclusions = settings["inclusions"]
     pipeline = DropletInclusionPipeline(
@@ -231,11 +227,11 @@ def main():
     if results:
         print("\nPipeline completed successfully!")
 
-        # Interactive editing mode (only when inclusions enabled)
-        if args.edit and detect_inclusions and pipeline.visualization_data:
-            print("\nLaunching interactive inclusion editor...")
-            editor = InclusionEditor(pipeline.visualization_data, results)
-            results = editor.run()  # Update results with manual corrections
+        # Interactive editor
+        if args.edit and pipeline.visualization_data:
+            print("\nLaunching editor...")
+            editor = Editor(pipeline.visualization_data, results, detect_inclusions=detect_inclusions)
+            results = editor.run()
 
             # Save updated results
             df = pd.DataFrame(results)
@@ -262,13 +258,6 @@ def main():
 
         stats_module = DropletStatistics(csv_path, settings)
         stats_module.run_analysis(str(output_dir), sample_frames)
-
-        # Launch viewer if requested (no editing, just viewing)
-        if args.view and pipeline.visualization_data:
-            print("\nLaunching interactive viewer...")
-            df = pd.DataFrame(results)
-            viewer = Viewer(pipeline.visualization_data, df)
-            viewer.run()
 
         # Archive project if requested
         if args.gzip:

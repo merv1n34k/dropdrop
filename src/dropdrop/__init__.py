@@ -4,13 +4,12 @@ from .cache import CacheManager
 from .config import load_config
 from .pipeline import DropletInclusionPipeline
 from .stats import DropletStatistics
-from .ui import BaseWindow, InclusionEditor, Viewer
+from .ui import BaseWindow, Editor
 
 __all__ = [
     "CacheManager",
     "DropletInclusionPipeline",
     "DropletStatistics",
-    "InclusionEditor",
-    "Viewer",
+    "Editor",
     "load_config",
 ]
