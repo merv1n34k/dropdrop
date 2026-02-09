@@ -14,5 +14,11 @@
     "enabled": true,
     "max_frames": 100,
     "strategy": "lru"
+  },
+  "settings": {
+    "dilution": 500,
+    "poisson": true,
+    "count": 6.5e5,
+    "inclusions": true
   }
 }

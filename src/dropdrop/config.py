@@ -26,6 +26,13 @@ DEFAULT_CONFIG = {
         "max_frames": 100,
         "strategy": "lru",
     },
+    # Project settings defaults
+    "settings": {
+        "dilution": 500,
+        "poisson": True,
+        "count": 6.5e5,
+        "inclusions": True,
+    },
 }
 
 

@@ -8,87 +8,50 @@ from pathlib import Path
 
 import pandas as pd
 
-from .cache import CacheManager
 from .config import load_config
 from .pipeline import DropletInclusionPipeline
 from .stats import DropletStatistics
 from .ui import Editor
 
 
-def parse_settings(settings_str):
-    """Parse compact settings string.
+def prompt_settings(config=None):
+    """Interactive prompts for project settings.
 
-    Format: key=value,key=value
-    Keys: d[ilution], p[oisson], c[ount], l[abel]
-
-    Examples:
-        "d=1000,p=on,c=6.5e5,l=experiment1"
-        "dilution=500,poisson=off"
+    Defaults are loaded from config.json 'settings' section.
     """
+    if config is None:
+        config = load_config()
+    defaults = config.get("settings", {})
+
     settings = {
-        "dilution": 500,
-        "poisson": True,
-        "count": 6.5e5,
+        "dilution": defaults.get("dilution", 500),
+        "poisson": defaults.get("poisson", True),
+        "count": defaults.get("count", 6.5e5),
         "label": None,
-        "inclusions": True,
+        "inclusions": defaults.get("inclusions", True),
     }
 
-    if not settings_str:
-        return settings
-
-    key_map = {
-        "d": "dilution",
-        "dilution": "dilution",
-        "p": "poisson",
-        "poisson": "poisson",
-        "c": "count",
-        "count": "count",
-        "l": "label",
-        "label": "label",
-        "i": "inclusions",
-        "inclusions": "inclusions",
-    }
-
-    for part in settings_str.split(","):
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        key = key_map.get(key.strip().lower(), key.strip().lower())
-
-        if key == "dilution":
-            settings["dilution"] = int(value)
-        elif key == "poisson":
-            settings["poisson"] = value.lower() in ("on", "yes", "true", "1")
-        elif key == "count":
-            settings["count"] = float(value)
-        elif key == "label":
-            settings["label"] = value.strip()
-        elif key == "inclusions":
-            settings["inclusions"] = value.lower() in ("on", "yes", "true", "1")
-
-    return settings
-
-
-def prompt_settings():
-    """Interactive prompts for settings when --settings not provided."""
-    settings = {"dilution": 500, "poisson": True, "count": 6.5e5, "label": None, "inclusions": True}
+    inc_default = "yes" if settings["inclusions"] else "no"
+    poi_default = "yes" if settings["poisson"] else "no"
 
     print("\n--- Project Settings ---")
 
     # Inclusion detection
-    use_inclusions = input("Detect inclusions? [yes/no] (yes): ").strip().lower()
-    settings["inclusions"] = use_inclusions != "no"
+    use_inclusions = input(f"Detect inclusions? [yes/no] ({inc_default}): ").strip().lower()
+    if use_inclusions:
+        settings["inclusions"] = use_inclusions != "no"
 
     # Poisson analysis (only if inclusions enabled)
     if settings["inclusions"]:
-        use_poisson = input("Use Poisson analysis? [yes/no] (yes): ").strip().lower()
-        settings["poisson"] = use_poisson != "no"
+        use_poisson = input(f"Use Poisson analysis? [yes/no] ({poi_default}): ").strip().lower()
+        if use_poisson:
+            settings["poisson"] = use_poisson != "no"
     else:
         settings["poisson"] = False
 
     if settings["poisson"]:
         # Bead count
-        count_input = input("Stock count/uL [6.5e5]: ").strip()
+        count_input = input(f"Stock count/uL [{settings['count']:.2g}]: ").strip()
         if count_input:
             try:
                 settings["count"] = float(count_input)
@@ -96,7 +59,7 @@ def prompt_settings():
                 print(f"  Invalid value, using default: {settings['count']}")
 
         # Dilution
-        dilution_input = input("Dilution factor [500]: ").strip()
+        dilution_input = input(f"Dilution factor [{settings['dilution']}]: ").strip()
         if dilution_input:
             try:
                 settings["dilution"] = int(dilution_input)
@@ -138,14 +101,6 @@ def main():
     )
 
     parser.add_argument(
-        "-s",
-        "--settings",
-        type=str,
-        default=None,
-        help='Compact settings: "d=1000,p=on,c=6.5e5,l=label,i=on" (d=dilution, p=poisson, c=count, l=label, i=inclusions)',
-    )
-
-    parser.add_argument(
         "-e",
         "--edit",
         action="store_true",
@@ -182,11 +137,8 @@ def main():
         print(f"ERROR: Input directory '{args.input_dir}' does not exist")
         sys.exit(1)
 
-    # Get settings (from --settings or interactive prompts)
-    if args.settings:
-        settings = parse_settings(args.settings)
-    else:
-        settings = prompt_settings()
+    # Get settings via interactive prompts
+    settings = prompt_settings()
 
     # Determine output directory
     if args.output_dir:

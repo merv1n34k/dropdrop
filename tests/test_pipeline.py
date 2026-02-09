@@ -28,34 +28,6 @@ class TestDropletInclusionPipeline:
 class TestCLI:
     """Tests for CLI helpers."""
 
-    def test_parse_settings_full(self):
-        """Test parsing full settings string."""
-        from dropdrop.cli import parse_settings
-
-        settings = parse_settings("d=1000,p=on,c=6.5e5,l=test_label")
-        assert settings["dilution"] == 1000
-        assert settings["poisson"] is True
-        assert settings["count"] == 6.5e5
-        assert settings["label"] == "test_label"
-
-    def test_parse_settings_short_keys(self):
-        """Test parsing with short key names."""
-        from dropdrop.cli import parse_settings
-
-        settings = parse_settings("d=500,p=off")
-        assert settings["dilution"] == 500
-        assert settings["poisson"] is False
-
-    def test_parse_settings_empty(self):
-        """Test parsing empty/None settings returns defaults."""
-        from dropdrop.cli import parse_settings
-
-        settings = parse_settings(None)
-        assert settings["dilution"] == 500
-        assert settings["poisson"] is True
-        assert settings["count"] == 6.5e5
-        assert settings["label"] is None
-
     def test_generate_project_name_with_label(self):
         """Test project name generation with label."""
         from dropdrop.cli import generate_project_name
