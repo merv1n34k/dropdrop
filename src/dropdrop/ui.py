@@ -159,6 +159,12 @@ class Editor(BaseWindow):
 
     # -- Display methods --
 
+    @staticmethod
+    def outlined_text(img, text, pos, font, scale, color, thickness):
+        """Draw text with black outline for readability."""
+        cv2.putText(img, text, pos, font, scale, (0, 0, 0), thickness + 2)
+        cv2.putText(img, text, pos, font, scale, color, thickness)
+
     def draw_frame(self):
         """Draw current frame with droplet masks and inclusions (edit mode)."""
         frame_data = self.get_current_frame_data()
@@ -178,8 +184,8 @@ class Editor(BaseWindow):
                 cv2.circle(display, (int(cx), int(cy)), radius, color, thickness)
                 cv2.circle(display, (int(cx), int(cy)), 3, color, -1)
                 if is_disabled:
-                    cv2.putText(display, "X", (int(cx) - 8, int(cy) + 8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
+                    self.outlined_text(display, "X", (int(cx) - 8, int(cy) + 8),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
 
         # Draw inclusions
         if self.detect_inclusions:
@@ -196,19 +202,19 @@ class Editor(BaseWindow):
             status = f"[EDIT] Frame {frame_idx} | Droplets: {active_droplets}/{total_droplets} | Inclusions: {count}"
         else:
             status = f"[EDIT] Frame {frame_idx} | Droplets: {active_droplets}/{total_droplets} | Inclusions: OFF"
-        cv2.putText(
+        self.outlined_text(
             display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
 
         # Hint bar
         if self.detect_inclusions:
-            hint = "Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | m: View | q: Exit"
+            hint = "Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | m: View | Arrow/Space: Navigate | q: Exit"
         else:
-            hint = "s: Toggle droplet | d: Droplets | m: View | q: Exit"
-        cv2.putText(
+            hint = "s: Toggle droplet | d: Droplets | m: View | Arrow/Space: Navigate | q: Exit"
+        self.outlined_text(
             display, hint,
-            (10, display.shape[0] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
+            (10, display.shape[0] - 15),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
         )
 
         return display
@@ -248,7 +254,7 @@ class Editor(BaseWindow):
             cv2.circle(overlay, (int(cx), int(cy)), 3, (255, 0, 0), -1)
 
             if inc_count > 0:
-                cv2.putText(
+                self.outlined_text(
                     overlay, str(inc_count),
                     (int(cx) - 10, int(cy) + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2,
@@ -297,17 +303,17 @@ class Editor(BaseWindow):
             img = cv2.cvtColor(min_proj, cv2.COLOR_GRAY2BGR)
 
         # Title label
-        cv2.putText(
+        self.outlined_text(
             img, f"[VIEW] Frame {frame_idx} | {layer_name}",
             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
         )
 
         # Hint bar
         hint = "v: Next layer | m: Edit mode | Arrow/Space: Navigate | q: Exit"
-        cv2.putText(
+        self.outlined_text(
             img, hint,
-            (10, img.shape[0] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
+            (10, img.shape[0] - 15),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
         )
 
         return img
@@ -349,9 +355,9 @@ class Editor(BaseWindow):
         """Run the editor."""
         print("\nDROPDROP EDITOR")
         if self.detect_inclusions:
-            print("Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | m: View | q: Exit\n")
+            print("Left: Add | Right: Remove | s: Toggle droplet | u: Undo | c: Clear | d: Droplets | m: View | Arrow/Space: Navigate | q: Exit\n")
         else:
-            print("s: Toggle droplet | d: Droplets | m: View | q: Exit\n")
+            print("s: Toggle droplet | d: Droplets | m: View | Arrow/Space: Navigate | q: Exit\n")
 
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
@@ -374,63 +380,66 @@ class Editor(BaseWindow):
 
         cv2.setMouseCallback(self.window_name, mouse_callback)
 
-        while True:
-            frame_idx = self.frames[self.current_index]
+        try:
+            while True:
+                frame_idx = self.frames[self.current_index]
 
-            if self.mode == "edit":
-                display = self.draw_frame()
-            else:
-                display = self.create_layer(frame_idx, self.view_layer)
-
-            cv2.imshow(self.window_name, display)
-
-            key = cv2.waitKey(30) & 0xFF
-
-            # Mode switching
-            if key == ord("m"):
                 if self.mode == "edit":
-                    self.mode = "view"
-                    self.view_layer = 0
-                    print(f"View mode: {self.LAYERS[self.view_layer]}")
+                    display = self.draw_frame()
                 else:
-                    self.mode = "edit"
-                    print("Edit mode")
-                continue
+                    display = self.create_layer(frame_idx, self.view_layer)
 
-            # View mode: cycle layers
-            if key == ord("v") and self.mode == "view":
-                self.view_layer = (self.view_layer + 1) % len(self.LAYERS)
-                print(f"Layer: {self.LAYERS[self.view_layer]}")
-                continue
+                cv2.imshow(self.window_name, display)
 
-            # Edit mode keys (inclusion editing)
-            if self.mode == "edit" and self.detect_inclusions:
-                if key == ord("c"):
-                    self.clear_inclusions()
-                    continue
-                elif key == ord("u"):
-                    self.undo()
+                key = cv2.waitKeyEx(30)
+
+                # Mode switching
+                if key == ord("m"):
+                    if self.mode == "edit":
+                        self.mode = "view"
+                        self.view_layer = 0
+                        print(f"View mode: {self.LAYERS[self.view_layer]}")
+                    else:
+                        self.mode = "edit"
+                        print("Edit mode")
                     continue
 
-            # Shared keys (both modes)
-            if key == ord("d"):
-                self.show_droplets = not self.show_droplets
-                print(f"Droplet visibility: {'ON' if self.show_droplets else 'OFF'}")
-            elif key == ord("s") and self.mode == "edit":
-                droplet_idx = self.get_droplet_at(*self.mouse_pos)
-                if droplet_idx is not None:
-                    self.toggle_droplet(droplet_idx)
-            elif key == ord("q") or key == 27:
-                break
-            elif key == 83 or key == ord(" "):
-                self.current_index = (self.current_index + 1) % len(self.frames)
-            elif key == 81:
-                self.current_index = (self.current_index - 1) % len(self.frames)
-            elif key == 13:
-                if self.current_index < len(self.frames) - 1:
-                    self.current_index += 1
-                else:
+                # View mode: cycle layers
+                if key == ord("v") and self.mode == "view":
+                    self.view_layer = (self.view_layer + 1) % len(self.LAYERS)
+                    print(f"Layer: {self.LAYERS[self.view_layer]}")
+                    continue
+
+                # Edit mode keys (inclusion editing)
+                if self.mode == "edit" and self.detect_inclusions:
+                    if key == ord("c"):
+                        self.clear_inclusions()
+                        continue
+                    elif key == ord("u"):
+                        self.undo()
+                        continue
+
+                # Shared keys (both modes)
+                if key == ord("d"):
+                    self.show_droplets = not self.show_droplets
+                    print(f"Droplet visibility: {'ON' if self.show_droplets else 'OFF'}")
+                elif key == ord("s") and self.mode == "edit":
+                    droplet_idx = self.get_droplet_at(*self.mouse_pos)
+                    if droplet_idx is not None:
+                        self.toggle_droplet(droplet_idx)
+                elif key == ord("q") or key == 27:
                     break
+                elif key in (83, 63235, 65363, 2555904) or key == ord(" "):
+                    self.current_index = (self.current_index + 1) % len(self.frames)
+                elif key in (81, 63234, 65361, 2424832):
+                    self.current_index = (self.current_index - 1) % len(self.frames)
+                elif key == 13:
+                    if self.current_index < len(self.frames) - 1:
+                        self.current_index += 1
+                    else:
+                        break
+        except KeyboardInterrupt:
+            print("\nEditor interrupted, applying current edits...")
 
         cv2.destroyAllWindows()
 
