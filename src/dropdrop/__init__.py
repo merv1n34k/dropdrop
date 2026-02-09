@@ -1,16 +1,16 @@
 """DropDrop - Droplet and Inclusion Detection Pipeline."""
 
-from .cache import CacheManager
+from .analysis import DropletStatistics, MultiplexStatistics
+from .cache import Cache
 from .config import load_config
-from .pipeline import DropletInclusionPipeline
-from .stats import DropletStatistics, MultiplexStatistics
+from .detection import Detection
 from .ui import BaseWindow, Editor
 
 __all__ = [
-    "CacheManager",
-    "DropletInclusionPipeline",
     "DropletStatistics",
     "MultiplexStatistics",
+    "Cache",
+    "Detection",
     "Editor",
     "load_config",
 ]

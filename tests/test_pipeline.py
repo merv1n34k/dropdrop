@@ -3,23 +3,23 @@
 import pytest
 
 
-class TestDropletInclusionPipeline:
-    """Tests for the main pipeline."""
+class TestDetection:
+    """Tests for the main detection pipeline."""
 
     def test_parse_filename_with_z_index(self):
         """Test filename parsing with z-stack index."""
-        from dropdrop.pipeline import DropletInclusionPipeline
+        from dropdrop.detection import Detection
 
-        pipeline = DropletInclusionPipeline(use_cache=False)
+        pipeline = Detection(use_cache=False)
         z_idx, frame_idx = pipeline.parse_filename("image_z01_a01f05d4.tif")
         assert z_idx == 1
         assert frame_idx == 5
 
     def test_parse_filename_without_z_index(self):
         """Test filename parsing without z-stack index."""
-        from dropdrop.pipeline import DropletInclusionPipeline
+        from dropdrop.detection import Detection
 
-        pipeline = DropletInclusionPipeline(use_cache=False)
+        pipeline = Detection(use_cache=False)
         z_idx, frame_idx = pipeline.parse_filename("image_a01f10d4.tif")
         assert z_idx == 0  # Default for non-z-stack
         assert frame_idx == 10
@@ -65,11 +65,11 @@ class TestCache:
 
     def test_cache_key_generation(self):
         """Test cache key generation from filename."""
-        from dropdrop.cache import CacheManager
+        from dropdrop.cache import Cache
         from dropdrop.config import load_config
 
         config = load_config()
-        cache = CacheManager(config)
+        cache = Cache(config)
         key1 = cache._get_cache_key("image_a01f01d4.tif")
         key2 = cache._get_cache_key("image_a01f01d4.tif")
         key3 = cache._get_cache_key("image_a01f02d4.tif")

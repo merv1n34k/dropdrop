@@ -10,8 +10,8 @@ from pathlib import Path
 import pandas as pd
 
 from .config import load_config
-from .pipeline import DropletInclusionPipeline
-from .stats import DropletStatistics, MultiplexStatistics
+from .analysis import DropletStatistics, MultiplexStatistics
+from .detection import Detection
 from .ui import Editor
 
 QUEUE_FILE = "queue.tmp"
@@ -162,7 +162,7 @@ def process_single_directory(input_dir, output_dir, settings, args,
     store_viz = args.edit
     use_cache = not args.no_cache
 
-    pipeline = DropletInclusionPipeline(
+    pipeline = Detection(
         store_visualizations=store_viz, use_cache=use_cache,
         detect_inclusions=detect_inclusions,
     )

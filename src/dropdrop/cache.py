@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 
-class CacheManager:
+class Cache:
     """Global LRU cache for expensive computations, stored in project root."""
 
     def __init__(self, config, cache_dir=None):

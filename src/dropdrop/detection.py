@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .cache import CacheManager
+from .cache import Cache
 from .config import load_config
 
 
-class DropletInclusionPipeline:
+class Detection:
     """Main pipeline for droplet and inclusion detection."""
 
     def __init__(self, config=None, store_visualizations=False, use_cache=True,
@@ -35,7 +35,7 @@ class DropletInclusionPipeline:
         self.sample_count = sample_count
         self.sample_frames = {}  # Always store a few samples for report
         self.use_cache = use_cache
-        self.cache = CacheManager(self.config) if use_cache else None
+        self.cache = Cache(self.config) if use_cache else None
         self.detect_inclusions = detect_inclusions
         self._cellpose_model = None
 
