@@ -17,15 +17,10 @@ from .ui import Editor
 QUEUE_FILE = "queue.tmp"
 
 
+# --- Settings ---
+
 def prompt_settings(config=None, skip_label=False):
-    """Interactive prompts for project settings.
-
-    Defaults are loaded from config.json 'settings' section.
-
-    Args:
-        config: Configuration dict. If None, loads from config.json.
-        skip_label: If True, skip label prompt (used in multiplex mode).
-    """
+    """Interactive prompts for project settings."""
     if config is None:
         config = load_config()
     defaults = config.get("settings", {})
@@ -43,12 +38,10 @@ def prompt_settings(config=None, skip_label=False):
 
     print("\n--- Project Settings ---")
 
-    # Inclusion detection
     use_inclusions = input(f"Detect inclusions? [yes/no] ({inc_default}): ").strip().lower()
     if use_inclusions:
         settings["inclusions"] = use_inclusions != "no"
 
-    # Poisson analysis (only if inclusions enabled)
     if settings["inclusions"]:
         use_poisson = input(f"Use Poisson analysis? [yes/no] ({poi_default}): ").strip().lower()
         if use_poisson:
@@ -57,7 +50,6 @@ def prompt_settings(config=None, skip_label=False):
         settings["poisson"] = False
 
     if settings["poisson"]:
-        # Bead count
         count_input = input(f"Stock count/uL [{settings['count']:.2g}]: ").strip()
         if count_input:
             try:
@@ -65,7 +57,6 @@ def prompt_settings(config=None, skip_label=False):
             except ValueError:
                 print(f"  Invalid value, using default: {settings['count']}")
 
-        # Dilution
         dilution_input = input(f"Dilution factor [{settings['dilution']}]: ").strip()
         if dilution_input:
             try:
@@ -73,7 +64,6 @@ def prompt_settings(config=None, skip_label=False):
             except ValueError:
                 print(f"  Invalid value, using default: {settings['dilution']}")
 
-    # Label (skip in multiplex mode where labels are assigned per directory)
     if not skip_label:
         label_input = input("Project label (optional, press Enter to skip): ").strip()
         settings["label"] = label_input if label_input else None
@@ -89,6 +79,8 @@ def generate_project_name(settings):
         return f"{date_str}_{settings['label']}"
     return date_str
 
+
+# --- Queue management ---
 
 def discover_subdirectories(parent_dir):
     """List subdirectories and prompt for labels. Skip if Enter is empty."""
@@ -108,7 +100,6 @@ def discover_subdirectories(parent_dir):
 
     if not queue:
         print("No directories selected.")
-
     return queue
 
 
@@ -149,24 +140,20 @@ def cleanup_queue():
         print(f"Queue file removed: {QUEUE_FILE}")
 
 
+# --- Pipeline ---
+
 def run_detection(input_dir, tmp_dir, settings, args, cellpose_model=None):
-    """Run detection pipeline on a single input directory into a .tmp dir.
+    """Run detection on a single input directory into a .tmp dir.
 
-    Returns:
-        The cellpose model (for reuse across runs).
+    Returns the cellpose model for reuse across runs.
     """
-    detect_inclusions = settings["inclusions"]
-    store_viz = args.edit
-    use_cache = not args.no_cache
-
     pipeline = Detection(
-        store_visualizations=store_viz, use_cache=use_cache,
-        detect_inclusions=detect_inclusions,
+        store_visualizations=args.edit, use_cache=not args.no_cache,
+        detect_inclusions=settings["inclusions"],
     )
 
     if cellpose_model is not None:
         pipeline._cellpose_model = cellpose_model
-
     if args.clear_cache and pipeline.cache:
         pipeline.cache.clear()
 
@@ -176,193 +163,40 @@ def run_detection(input_dir, tmp_dir, settings, args, cellpose_model=None):
     if results:
         print("\nPipeline completed successfully!")
 
-        # Interactive editor
         if args.edit and pipeline.visualization_data:
             print("\nLaunching editor...")
             editor = Editor(pipeline.visualization_data, results,
-                            detect_inclusions=detect_inclusions)
+                            detect_inclusions=settings["inclusions"])
             results = editor.run()
-
             df = pd.DataFrame(results)
-            csv_path = tmp_dir / "data.csv"
-            df.to_csv(csv_path, index=False)
-            print(f"Updated results saved to: {csv_path}")
+            df.to_csv(tmp_dir / "data.csv", index=False)
 
-        # Save sample frame PNGs
         pipeline.save_sample_frames(str(tmp_dir))
 
     return pipeline._cellpose_model
 
 
-def cleanup_tmp_dirs(output_dir):
-    """Remove all .tmp_* directories inside output_dir."""
-    for tmp_dir in Path(output_dir).glob(".tmp_*"):
-        if tmp_dir.is_dir():
-            shutil.rmtree(tmp_dir)
-
-
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Droplet and inclusion detection pipeline using Cellpose"
-    )
-
-    parser.add_argument(
-        "input_dir", type=str, nargs="?", default=None,
-        help="Input directory containing z-stack images",
-    )
-
-    parser.add_argument(
-        "output_dir",
-        type=str,
-        nargs="?",
-        default=None,
-        help="Output directory (default: ./results/<date>_<label>)",
-    )
-
-    parser.add_argument(
-        "-m",
-        "--multiplex",
-        type=str,
-        default=None,
-        help="Parent directory containing sample subdirectories for batch processing",
-    )
-
-    parser.add_argument(
-        "-r",
-        "--resurrect",
-        action="store_true",
-        help=f"Resume processing from existing {QUEUE_FILE}",
-    )
-
-    parser.add_argument(
-        "-e",
-        "--edit",
-        action="store_true",
-        help="Open interactive editor/viewer",
-    )
-
-    parser.add_argument(
-        "-n",
-        "--number",
-        type=int,
-        default=None,
-        help="Process only the first N frames (for testing)",
-    )
-    parser.add_argument(
-        "--no-cache",
-        action="store_true",
-        help="Disable caching for this run",
-    )
-    parser.add_argument(
-        "--clear-cache",
-        action="store_true",
-        help="Clear cache before processing",
-    )
-    parser.add_argument(
-        "-z",
-        "--gzip",
-        action="store_true",
-        help="Archive project directory as .tar.gz after completion",
-    )
-    args = parser.parse_args()
-
-    # Validate argument combinations
-    if args.resurrect and (args.input_dir or args.multiplex):
-        print("ERROR: --resurrect cannot be used with input_dir or --multiplex")
-        sys.exit(1)
-    if args.multiplex and args.input_dir:
-        print("ERROR: Cannot use both input_dir and --multiplex")
-        sys.exit(1)
-    if not args.resurrect and not args.multiplex and not args.input_dir:
-        parser.print_help()
-        sys.exit(1)
-
-    # --- Resurrect mode ---
-    if args.resurrect:
-        queue = read_queue()
-        if queue is None:
-            print(f"ERROR: No {QUEUE_FILE} found. Nothing to resume.")
-            sys.exit(1)
-
-        pending_count = sum(1 for e in queue if e["status"] == "pending")
-        print(f"Resuming from {QUEUE_FILE}: {pending_count}/{len(queue)} pending")
-
-        settings = prompt_settings(skip_label=True)
-
-        date_str = datetime.now().strftime("%Y%m%d")
-        output_dir = Path("results") / f"{date_str}_multiplex"
-        process_multiplex(queue, output_dir, settings, args)
-        return
-
-    # --- Multiplex mode ---
-    if args.multiplex:
-        parent_dir = args.multiplex
-        if not Path(parent_dir).exists():
-            print(f"ERROR: Directory '{parent_dir}' does not exist")
-            sys.exit(1)
-
-        queue = discover_subdirectories(parent_dir)
-        if not queue:
-            return
-
-        write_queue(queue)
-        print(f"\nQueue saved to {QUEUE_FILE} ({len(queue)} entries)")
-
-        settings = prompt_settings(skip_label=True)
-
-        date_str = datetime.now().strftime("%Y%m%d")
-        output_dir = Path("results") / f"{date_str}_multiplex"
-        process_multiplex(queue, output_dir, settings, args)
-        return
-
-    # --- Single directory mode ---
-    if not Path(args.input_dir).exists():
-        print(f"ERROR: Input directory '{args.input_dir}' does not exist")
-        sys.exit(1)
-
-    settings = prompt_settings()
-
-    # Determine output directory
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-    else:
-        project_name = generate_project_name(settings)
-        output_dir = Path("results") / project_name
-
-    settings["input_dir"] = str(Path(args.input_dir).resolve())
-    label = settings.get("label") or "data"
-
-    # Print summary
-    print(f"Input directory: {args.input_dir}")
-    print(f"Output directory: {output_dir}")
-    print(f"Inclusions: {'ON' if settings['inclusions'] else 'OFF'}")
-    if settings["inclusions"] and settings["poisson"]:
-        print(f"Poisson: ON (count={settings['count']:.2e}, dilution={settings['dilution']})")
-    elif settings["inclusions"]:
-        print("Poisson: OFF")
-    if args.number:
-        print(f"Frame limit: {args.number}")
-
-    # Detection → .tmp dir → Analysis → cleanup
-    tmp_dir = output_dir / f".tmp_{label}"
-    run_detection(args.input_dir, tmp_dir, settings, args)
+def finalize(output_dir, settings, gzip=False):
+    """Run analysis, clean up .tmp dirs, and optionally archive."""
+    output_dir = Path(output_dir)
 
     print("\nGenerating statistical analysis...")
     Analysis(str(output_dir), settings).run()
-    cleanup_tmp_dirs(output_dir)
 
-    # Archive
-    if args.gzip and output_dir.exists():
+    for tmp_dir in output_dir.glob(".tmp_*"):
+        if tmp_dir.is_dir():
+            shutil.rmtree(tmp_dir)
+
+    if gzip and output_dir.exists():
         archive_name = f"{output_dir}.tar.gz"
-        print(f"\nArchiving project to: {archive_name}")
+        print(f"\nArchiving to: {archive_name}")
         with tarfile.open(archive_name, "w:gz") as tar:
             tar.add(output_dir, arcname=output_dir.name)
         print(f"Archive created: {archive_name}")
 
 
-def process_multiplex(queue, output_dir, settings, args):
-    """Process multiplex queue: Detection per sample → Analysis → cleanup."""
+def process_queue(queue, output_dir, settings, args):
+    """Process all pending queue entries, then finalize."""
     pending = [(i, e) for i, e in enumerate(queue) if e["status"] == "pending"]
 
     if not pending:
@@ -375,39 +209,115 @@ def process_multiplex(queue, output_dir, settings, args):
 
     for i, entry in pending:
         label = entry["label"]
-        input_dir = entry["path"]
-
         run_settings = settings.copy()
         run_settings["label"] = label
-        run_settings["input_dir"] = str(Path(input_dir).resolve())
-
-        tmp_dir = output_dir / f".tmp_{label}"
+        run_settings["input_dir"] = str(Path(entry["path"]).resolve())
 
         print(f"\n{'='*60}")
-        print(f"[{i+1}/{len(queue)}] {Path(input_dir).name} -> {label}")
+        print(f"[{i+1}/{len(queue)}] {Path(entry['path']).name} -> {label}")
         print(f"{'='*60}")
 
         cellpose_model = run_detection(
-            input_dir, tmp_dir, run_settings, args, cellpose_model,
+            entry["path"], output_dir / f".tmp_{label}",
+            run_settings, args, cellpose_model,
         )
-
         update_queue_status(queue, i)
 
     cleanup_queue()
     print(f"\nAll {len(pending)} directories processed.")
+    finalize(output_dir, settings, gzip=args.gzip)
 
-    # Analysis auto-discovers .tmp_* dirs
-    print(f"\nGenerating multiplex analysis -> {output_dir}")
-    Analysis(str(output_dir), settings).run()
-    cleanup_tmp_dirs(output_dir)
 
-    # Archive
-    if args.gzip and output_dir.exists():
-        archive_name = f"{output_dir}.tar.gz"
-        print(f"\nArchiving to: {archive_name}")
-        with tarfile.open(archive_name, "w:gz") as tar:
-            tar.add(output_dir, arcname=output_dir.name)
-        print(f"Archive created: {archive_name}")
+# --- Entry point ---
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Droplet and inclusion detection pipeline using Cellpose"
+    )
+    parser.add_argument("input_dir", type=str, nargs="?", default=None,
+                        help="Input directory containing z-stack images")
+    parser.add_argument("output_dir", type=str, nargs="?", default=None,
+                        help="Output directory (default: ./results/<date>_<label>)")
+    parser.add_argument("-m", "--multiplex", type=str, default=None,
+                        help="Parent directory for batch processing")
+    parser.add_argument("-r", "--resurrect", action="store_true",
+                        help=f"Resume from existing {QUEUE_FILE}")
+    parser.add_argument("-e", "--edit", action="store_true",
+                        help="Open interactive editor/viewer")
+    parser.add_argument("-n", "--number", type=int, default=None,
+                        help="Process only first N frames")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Disable caching for this run")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Clear cache before processing")
+    parser.add_argument("-z", "--gzip", action="store_true",
+                        help="Archive project directory as .tar.gz")
+    args = parser.parse_args()
+
+    # Validate
+    if args.resurrect and (args.input_dir or args.multiplex):
+        print("ERROR: --resurrect cannot be used with input_dir or --multiplex")
+        sys.exit(1)
+    if args.multiplex and args.input_dir:
+        print("ERROR: Cannot use both input_dir and --multiplex")
+        sys.exit(1)
+    if not args.resurrect and not args.multiplex and not args.input_dir:
+        parser.print_help()
+        sys.exit(1)
+
+    # --- Multiplex / Resurrect ---
+    if args.resurrect or args.multiplex:
+        if args.resurrect:
+            queue = read_queue()
+            if queue is None:
+                print(f"ERROR: No {QUEUE_FILE} found. Nothing to resume.")
+                sys.exit(1)
+            pending_count = sum(1 for e in queue if e["status"] == "pending")
+            print(f"Resuming from {QUEUE_FILE}: {pending_count}/{len(queue)} pending")
+        else:
+            if not Path(args.multiplex).exists():
+                print(f"ERROR: Directory '{args.multiplex}' does not exist")
+                sys.exit(1)
+            queue = discover_subdirectories(args.multiplex)
+            if not queue:
+                return
+            write_queue(queue)
+            print(f"\nQueue saved to {QUEUE_FILE} ({len(queue)} entries)")
+
+        settings = prompt_settings(skip_label=True)
+        date_str = datetime.now().strftime("%Y%m%d")
+        output_dir = Path("results") / f"{date_str}_multiplex"
+        process_queue(queue, output_dir, settings, args)
+        return
+
+    # --- Single directory ---
+    if not Path(args.input_dir).exists():
+        print(f"ERROR: Input directory '{args.input_dir}' does not exist")
+        sys.exit(1)
+
+    settings = prompt_settings()
+
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path("results") / generate_project_name(settings)
+
+    settings["input_dir"] = str(Path(args.input_dir).resolve())
+    label = settings.get("label") or "data"
+
+    print(f"Input: {args.input_dir}")
+    print(f"Output: {output_dir}")
+    print(f"Inclusions: {'ON' if settings['inclusions'] else 'OFF'}")
+    if settings["inclusions"] and settings["poisson"]:
+        print(f"Poisson: ON (count={settings['count']:.2e}, dilution={settings['dilution']})")
+    elif settings["inclusions"]:
+        print("Poisson: OFF")
+    if args.number:
+        print(f"Frame limit: {args.number}")
+
+    run_detection(args.input_dir, output_dir / f".tmp_{label}", settings, args)
+    finalize(output_dir, settings, gzip=args.gzip)
 
 
 if __name__ == "__main__":
