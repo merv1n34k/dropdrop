@@ -419,6 +419,37 @@ class Detection:
 
         return self.results_data
 
+    def save_sample_frames(self, output_dir):
+        """Render overlay on sample frames and save as PNGs.
+
+        Draws green droplet contours, red inclusion fills, and yellow
+        inclusion counts on each sample frame.
+        """
+        output_path = Path(output_dir)
+        for frame_idx, viz in self.sample_frames.items():
+            img = viz["min_projection"]
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+            for i, droplet in enumerate(viz["droplet_masks"]):
+                mask = droplet["mask"]
+                contours, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                cv2.drawContours(rgb, contours, -1, (0, 255, 0), 1)
+
+                if self.detect_inclusions:
+                    # Red inclusion fill
+                    inc_mask = viz["inclusion_masks"][i]
+                    rgb[inc_mask > 0] = (0, 0, 255)
+
+                    # Yellow count label
+                    cx, cy = droplet["center"]
+                    count = droplet["inclusions"]
+                    cv2.putText(rgb, str(count), (cx - 5, cy + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+            cv2.imwrite(str(output_path / f"sample_{frame_idx}.png"), rgb)
+
     def print_summary(self, df):
         """Print one-line summary."""
         if self.detect_inclusions:

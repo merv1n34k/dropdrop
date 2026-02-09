@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .analysis import Analysis
 from .config import load_config
-from .analysis import DropletStatistics, MultiplexStatistics
 from .detection import Detection
 from .ui import Editor
 
@@ -149,11 +149,8 @@ def cleanup_queue():
         print(f"Queue file removed: {QUEUE_FILE}")
 
 
-def process_single_directory(input_dir, output_dir, settings, args,
-                              cellpose_model=None):
-    """Process a single input directory through the pipeline.
-
-    Runs pipeline + optional editor, saves CSV. Stats are generated separately.
+def run_detection(input_dir, tmp_dir, settings, args, cellpose_model=None):
+    """Run detection pipeline on a single input directory into a .tmp dir.
 
     Returns:
         The cellpose model (for reuse across runs).
@@ -167,16 +164,14 @@ def process_single_directory(input_dir, output_dir, settings, args,
         detect_inclusions=detect_inclusions,
     )
 
-    # Reuse cellpose model across runs
     if cellpose_model is not None:
         pipeline._cellpose_model = cellpose_model
 
-    # Handle cache clear request
     if args.clear_cache and pipeline.cache:
         pipeline.cache.clear()
 
-    output_dir = Path(output_dir)
-    results = pipeline.run(input_dir, str(output_dir), frame_limit=args.number)
+    tmp_dir = Path(tmp_dir)
+    results = pipeline.run(input_dir, str(tmp_dir), frame_limit=args.number)
 
     if results:
         print("\nPipeline completed successfully!")
@@ -184,82 +179,26 @@ def process_single_directory(input_dir, output_dir, settings, args,
         # Interactive editor
         if args.edit and pipeline.visualization_data:
             print("\nLaunching editor...")
-            editor = Editor(pipeline.visualization_data, results, detect_inclusions=detect_inclusions)
+            editor = Editor(pipeline.visualization_data, results,
+                            detect_inclusions=detect_inclusions)
             results = editor.run()
 
-            # Save updated results
             df = pd.DataFrame(results)
-            csv_path = output_dir / "data.csv"
+            csv_path = tmp_dir / "data.csv"
             df.to_csv(csv_path, index=False)
             print(f"Updated results saved to: {csv_path}")
+
+        # Save sample frame PNGs
+        pipeline.save_sample_frames(str(tmp_dir))
 
     return pipeline._cellpose_model
 
 
-def process_queue(queue, settings, args):
-    """Process all pending entries in a queue."""
-    pending = [(i, e) for i, e in enumerate(queue) if e["status"] == "pending"]
-
-    if not pending:
-        print("No pending directories to process.")
-        cleanup_queue()
-        return
-
-    print(f"\nProcessing {len(pending)} directories...")
-    cellpose_model = None
-    sample_data = []  # (label, csv_path) tuples
-    temp_dirs = []
-
-    for i, entry in pending:
-        label = entry["label"]
-        input_dir = entry["path"]
-
-        run_settings = settings.copy()
-        run_settings["label"] = label
-        run_settings["input_dir"] = str(Path(input_dir).resolve())
-
-        # Use temp dir for per-sample pipeline output
-        temp_output = Path("results") / f".tmp_{label}"
-        temp_dirs.append(temp_output)
-
-        print(f"\n{'='*60}")
-        print(f"[{i+1}/{len(queue)}] {Path(input_dir).name} -> {label}")
-        print(f"{'='*60}")
-
-        cellpose_model = process_single_directory(
-            input_dir, temp_output, run_settings, args, cellpose_model,
-        )
-
-        csv_path = temp_output / "data.csv"
-        if csv_path.exists():
-            sample_data.append((label, csv_path))
-
-        update_queue_status(queue, i)
-
-    cleanup_queue()
-    print(f"\nAll {len(pending)} directories processed.")
-
-    # Generate merged multiplex output from CSVs
-    if sample_data:
-        date_str = datetime.now().strftime("%Y%m%d")
-        merged_output = Path("results") / f"{date_str}_multiplex"
-
-        print(f"\nGenerating multiplex analysis -> {merged_output}")
-        multiplex_stats = MultiplexStatistics(sample_data, settings)
-        multiplex_stats.run_analysis(str(merged_output))
-
-        # Clean up temp dirs
-        for temp_dir in temp_dirs:
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
-
-        # Archive merged directory
-        if args.gzip:
-            archive_name = f"{merged_output}.tar.gz"
-            print(f"\nArchiving to: {archive_name}")
-            with tarfile.open(archive_name, "w:gz") as tar:
-                tar.add(merged_output, arcname=merged_output.name)
-            print(f"Archive created: {archive_name}")
+def cleanup_tmp_dirs(output_dir):
+    """Remove all .tmp_* directories inside output_dir."""
+    for tmp_dir in Path(output_dir).glob(".tmp_*"):
+        if tmp_dir.is_dir():
+            shutil.rmtree(tmp_dir)
 
 
 def main():
@@ -350,7 +289,10 @@ def main():
         print(f"Resuming from {QUEUE_FILE}: {pending_count}/{len(queue)} pending")
 
         settings = prompt_settings(skip_label=True)
-        process_queue(queue, settings, args)
+
+        date_str = datetime.now().strftime("%Y%m%d")
+        output_dir = Path("results") / f"{date_str}_multiplex"
+        process_multiplex(queue, output_dir, settings, args)
         return
 
     # --- Multiplex mode ---
@@ -368,7 +310,10 @@ def main():
         print(f"\nQueue saved to {QUEUE_FILE} ({len(queue)} entries)")
 
         settings = prompt_settings(skip_label=True)
-        process_queue(queue, settings, args)
+
+        date_str = datetime.now().strftime("%Y%m%d")
+        output_dir = Path("results") / f"{date_str}_multiplex"
+        process_multiplex(queue, output_dir, settings, args)
         return
 
     # --- Single directory mode ---
@@ -386,6 +331,7 @@ def main():
         output_dir = Path("results") / project_name
 
     settings["input_dir"] = str(Path(args.input_dir).resolve())
+    label = settings.get("label") or "data"
 
     # Print summary
     print(f"Input directory: {args.input_dir}")
@@ -398,19 +344,67 @@ def main():
     if args.number:
         print(f"Frame limit: {args.number}")
 
-    process_single_directory(args.input_dir, output_dir, settings, args)
+    # Detection → .tmp dir → Analysis → cleanup
+    tmp_dir = output_dir / f".tmp_{label}"
+    run_detection(args.input_dir, tmp_dir, settings, args)
 
-    # Generate stats from CSV
-    csv_path = output_dir / "data.csv"
-    if csv_path.exists():
-        print("\nGenerating statistical analysis...")
-        stats_module = DropletStatistics(csv_path, settings)
-        stats_module.run_analysis(str(output_dir))
+    print("\nGenerating statistical analysis...")
+    Analysis(str(output_dir), settings).run()
+    cleanup_tmp_dirs(output_dir)
 
-    # Archive single directory
+    # Archive
     if args.gzip and output_dir.exists():
         archive_name = f"{output_dir}.tar.gz"
         print(f"\nArchiving project to: {archive_name}")
+        with tarfile.open(archive_name, "w:gz") as tar:
+            tar.add(output_dir, arcname=output_dir.name)
+        print(f"Archive created: {archive_name}")
+
+
+def process_multiplex(queue, output_dir, settings, args):
+    """Process multiplex queue: Detection per sample → Analysis → cleanup."""
+    pending = [(i, e) for i, e in enumerate(queue) if e["status"] == "pending"]
+
+    if not pending:
+        print("No pending directories to process.")
+        cleanup_queue()
+        return
+
+    print(f"\nProcessing {len(pending)} directories...")
+    cellpose_model = None
+
+    for i, entry in pending:
+        label = entry["label"]
+        input_dir = entry["path"]
+
+        run_settings = settings.copy()
+        run_settings["label"] = label
+        run_settings["input_dir"] = str(Path(input_dir).resolve())
+
+        tmp_dir = output_dir / f".tmp_{label}"
+
+        print(f"\n{'='*60}")
+        print(f"[{i+1}/{len(queue)}] {Path(input_dir).name} -> {label}")
+        print(f"{'='*60}")
+
+        cellpose_model = run_detection(
+            input_dir, tmp_dir, run_settings, args, cellpose_model,
+        )
+
+        update_queue_status(queue, i)
+
+    cleanup_queue()
+    print(f"\nAll {len(pending)} directories processed.")
+
+    # Analysis auto-discovers .tmp_* dirs
+    print(f"\nGenerating multiplex analysis -> {output_dir}")
+    Analysis(str(output_dir), settings).run()
+    cleanup_tmp_dirs(output_dir)
+
+    # Archive
+    if args.gzip and output_dir.exists():
+        archive_name = f"{output_dir}.tar.gz"
+        print(f"\nArchiving to: {archive_name}")
         with tarfile.open(archive_name, "w:gz") as tar:
             tar.add(output_dir, arcname=output_dir.name)
         print(f"Archive created: {archive_name}")
