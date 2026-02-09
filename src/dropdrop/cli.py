@@ -1,6 +1,7 @@
 """Command-line interface for DropDrop pipeline."""
 
 import argparse
+import shutil
 import sys
 import tarfile
 from datetime import datetime
@@ -10,7 +11,7 @@ import pandas as pd
 
 from .config import load_config
 from .pipeline import DropletInclusionPipeline
-from .stats import DropletStatistics
+from .stats import DropletStatistics, MultiplexStatistics
 from .ui import Editor
 
 QUEUE_FILE = "queue.tmp"
@@ -148,10 +149,14 @@ def cleanup_queue():
         print(f"Queue file removed: {QUEUE_FILE}")
 
 
-def process_single_directory(input_dir, output_dir, settings, args, cellpose_model=None):
+def process_single_directory(input_dir, output_dir, settings, args,
+                              cellpose_model=None):
     """Process a single input directory through the pipeline.
 
-    Returns the cellpose model for reuse across multiplex runs.
+    Runs pipeline + optional editor, saves CSV. Stats are generated separately.
+
+    Returns:
+        The cellpose model (for reuse across runs).
     """
     detect_inclusions = settings["inclusions"]
     store_viz = args.edit
@@ -170,6 +175,7 @@ def process_single_directory(input_dir, output_dir, settings, args, cellpose_mod
     if args.clear_cache and pipeline.cache:
         pipeline.cache.clear()
 
+    output_dir = Path(output_dir)
     results = pipeline.run(input_dir, str(output_dir), frame_limit=args.number)
 
     if results:
@@ -187,26 +193,6 @@ def process_single_directory(input_dir, output_dir, settings, args, cellpose_mod
             df.to_csv(csv_path, index=False)
             print(f"Updated results saved to: {csv_path}")
 
-        # Always generate statistics (after any interactive corrections)
-        print("\nGenerating statistical analysis...")
-        csv_path = output_dir / "data.csv"
-
-        # Extract sample frames for report
-        sample_frames = None
-        if pipeline.sample_frames:
-            sample_frames = []
-            for idx in sorted(pipeline.sample_frames.keys()):
-                viz = pipeline.sample_frames[idx]
-                sample_frames.append({
-                    "frame_idx": idx,
-                    "image": viz["min_projection"],
-                    "droplet_masks": viz.get("droplet_masks", []),
-                    "inclusion_masks": viz.get("inclusion_masks", []),
-                })
-
-        stats_module = DropletStatistics(csv_path, settings)
-        stats_module.run_analysis(str(output_dir), sample_frames)
-
     return pipeline._cellpose_model
 
 
@@ -221,45 +207,59 @@ def process_queue(queue, settings, args):
 
     print(f"\nProcessing {len(pending)} directories...")
     cellpose_model = None
-    output_dirs = []
+    sample_data = []  # (label, csv_path) tuples
+    temp_dirs = []
 
     for i, entry in pending:
         label = entry["label"]
         input_dir = entry["path"]
 
-        # Override label in settings for this run
         run_settings = settings.copy()
         run_settings["label"] = label
         run_settings["input_dir"] = str(Path(input_dir).resolve())
 
-        output_dir = Path("results") / generate_project_name(run_settings)
-        output_dirs.append(output_dir)
+        # Use temp dir for per-sample pipeline output
+        temp_output = Path("results") / f".tmp_{label}"
+        temp_dirs.append(temp_output)
 
         print(f"\n{'='*60}")
         print(f"[{i+1}/{len(queue)}] {Path(input_dir).name} -> {label}")
-        print(f"  Input:  {input_dir}")
-        print(f"  Output: {output_dir}")
         print(f"{'='*60}")
 
         cellpose_model = process_single_directory(
-            input_dir, output_dir, run_settings, args, cellpose_model
+            input_dir, temp_output, run_settings, args, cellpose_model,
         )
+
+        csv_path = temp_output / "data.csv"
+        if csv_path.exists():
+            sample_data.append((label, csv_path))
 
         update_queue_status(queue, i)
 
     cleanup_queue()
     print(f"\nAll {len(pending)} directories processed.")
 
-    # Archive all output directories in a single archive
-    if args.gzip and output_dirs:
+    # Generate merged multiplex output from CSVs
+    if sample_data:
         date_str = datetime.now().strftime("%Y%m%d")
-        archive_name = f"results/{date_str}_multiplex.tar.gz"
-        print(f"\nArchiving all directories to: {archive_name}")
-        with tarfile.open(archive_name, "w:gz") as tar:
-            for output_dir in output_dirs:
-                if output_dir.exists():
-                    tar.add(output_dir, arcname=output_dir.name)
-        print(f"Archive created: {archive_name}")
+        merged_output = Path("results") / f"{date_str}_multiplex"
+
+        print(f"\nGenerating multiplex analysis -> {merged_output}")
+        multiplex_stats = MultiplexStatistics(sample_data, settings)
+        multiplex_stats.run_analysis(str(merged_output))
+
+        # Clean up temp dirs
+        for temp_dir in temp_dirs:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+
+        # Archive merged directory
+        if args.gzip:
+            archive_name = f"{merged_output}.tar.gz"
+            print(f"\nArchiving to: {archive_name}")
+            with tarfile.open(archive_name, "w:gz") as tar:
+                tar.add(merged_output, arcname=merged_output.name)
+            print(f"Archive created: {archive_name}")
 
 
 def main():
@@ -399,6 +399,13 @@ def main():
         print(f"Frame limit: {args.number}")
 
     process_single_directory(args.input_dir, output_dir, settings, args)
+
+    # Generate stats from CSV
+    csv_path = output_dir / "data.csv"
+    if csv_path.exists():
+        print("\nGenerating statistical analysis...")
+        stats_module = DropletStatistics(csv_path, settings)
+        stats_module.run_analysis(str(output_dir))
 
     # Archive single directory
     if args.gzip and output_dir.exists():

@@ -10,6 +10,7 @@ import pandas as pd
 import seaborn as sns
 from scipy import stats
 
+
 # Set style for better-looking plots
 sns.set_style("whitegrid")
 plt.rcParams["figure.dpi"] = 100
@@ -510,3 +511,353 @@ class DropletStatistics:
         summary_path = output_path / "summary.txt"
         with open(summary_path, "w") as f:
             f.write("\n".join(lines))
+
+
+class MultiplexStatistics:
+    """Statistical analysis across multiple samples for multiplex mode.
+
+    Reads CSVs directly — decoupled from pipeline processing.
+    """
+
+    def __init__(self, samples, settings):
+        """Initialize with sample data and settings.
+
+        Args:
+            samples: List of (label, csv_path) tuples.
+            settings: Dict with analysis settings.
+        """
+        self.settings = settings
+        self.use_inclusions = settings.get("inclusions", True)
+        self.use_poisson = settings.get("poisson", True) and self.use_inclusions
+
+        self.samples = []
+        for label, csv_path in samples:
+            self.samples.append({
+                "label": label,
+                "df": pd.read_csv(csv_path),
+            })
+
+    def _calculate_poisson(self, df, median_diameter_um):
+        """Calculate theoretical Poisson distribution for a sample."""
+        bead_count = self.settings.get("count", 6.5e5)
+        dilution = self.settings.get("dilution", 1000)
+        radius_um = median_diameter_um / 2
+        volume_ml = (4 / 3) * np.pi * (radius_um**3) * 1e-9
+        lambda_val = (bead_count / (dilution * 2)) * volume_ml
+        max_inc = int(df["inclusions"].max()) + 3
+        x_range = np.arange(0, max_inc + 1)
+        theoretical = stats.poisson.pmf(x_range, lambda_val)
+        return x_range, theoretical, lambda_val
+
+    def compute_per_sample_stats(self):
+        """Compute statistics for each sample."""
+        all_stats = []
+        for sample in self.samples:
+            df = sample["df"]
+            mean_d = df["diameter_um"].mean()
+            median_d = df["diameter_um"].median()
+            std_d = df["diameter_um"].std()
+            cv = (std_d / mean_d * 100) if mean_d > 0 else 0
+            total_droplets = len(df)
+            total_inclusions = int(df["inclusions"].sum()) if self.use_inclusions else 0
+            with_inclusions = int((df["inclusions"] > 0).sum()) if self.use_inclusions else 0
+
+            sample_stats = {
+                "label": sample["label"],
+                "mean_d": mean_d,
+                "median_d": median_d,
+                "std_d": std_d,
+                "cv": cv,
+                "total_droplets": total_droplets,
+                "total_inclusions": total_inclusions,
+                "with_inclusions": with_inclusions,
+                "lambda_val": None,
+                "chi2": None,
+                "p_value": None,
+            }
+
+            if self.use_poisson:
+                x_range, theoretical, lambda_val = self._calculate_poisson(df, median_d)
+                actual = df["inclusions"].value_counts().sort_index()
+                # Chi-squared test
+                observed, expected = [], []
+                for i in actual.index:
+                    if i < len(theoretical):
+                        observed.append(actual[i])
+                        expected.append(theoretical[i] * total_droplets)
+                observed = np.array(observed)
+                expected = np.array(expected)
+                mask = expected >= 5
+                chi2, p_value = None, None
+                if mask.sum() >= 2:
+                    obs_f = observed[mask]
+                    exp_f = expected[mask]
+                    exp_f = exp_f * (obs_f.sum() / exp_f.sum())
+                    chi2, p_value = stats.chisquare(obs_f, exp_f)
+                sample_stats["lambda_val"] = lambda_val
+                sample_stats["chi2"] = chi2
+                sample_stats["p_value"] = p_value
+
+            all_stats.append(sample_stats)
+
+        return all_stats
+
+    def compute_global_axes(self):
+        """Compute shared axis limits across all samples."""
+        all_diameters = pd.concat([s["df"]["diameter_um"] for s in self.samples])
+        d_min = all_diameters.min()
+        d_max = all_diameters.max()
+        margin = (d_max - d_min) * 0.05
+
+        bins = np.linspace(d_min - margin, d_max + margin, 26)
+
+        y_max = 0
+        for s in self.samples:
+            counts, _ = np.histogram(s["df"]["diameter_um"], bins=bins)
+            y_max = max(y_max, counts.max())
+
+        poisson_x_max = 0
+        poisson_y_max = 0
+        if self.use_poisson:
+            for s in self.samples:
+                max_inc = int(s["df"]["inclusions"].max())
+                poisson_x_max = max(poisson_x_max, max_inc + 3)
+                actual = s["df"]["inclusions"].value_counts().sort_index()
+                for val in actual.values:
+                    pct = val / len(s["df"]) * 100
+                    poisson_y_max = max(poisson_y_max, pct)
+
+        return {
+            "bins": bins,
+            "diameter_y_max": int(y_max * 1.15),
+            "poisson_x_max": poisson_x_max,
+            "poisson_y_max": poisson_y_max * 1.15,
+        }
+
+    def merge_dataframes(self):
+        """Merge all sample DataFrames with 'sample' column."""
+        dfs = []
+        for s in self.samples:
+            df_copy = s["df"].copy()
+            df_copy.insert(0, "sample", s["label"])
+            dfs.append(df_copy)
+        return pd.concat(dfs, ignore_index=True)
+
+    def plot_overlaid_size_distribution(self, output_path, axes_limits):
+        """Plot overlaid size distributions from all samples."""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        bins = axes_limits["bins"]
+        colors = plt.cm.Set2(np.linspace(0, 1, len(self.samples)))
+
+        for i, sample in enumerate(self.samples):
+            ax.hist(sample["df"]["diameter_um"].values, bins=bins,
+                    color=colors[i], edgecolor="black", alpha=0.5, label=sample["label"])
+
+        ax.set_xlabel("Diameter (um)")
+        ax.set_ylabel("Count")
+        ax.set_title("Droplet Size Distribution (All Samples)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_path / "size_distribution.png", dpi=200)
+        plt.close()
+
+    def plot_overlaid_poisson(self, output_path, axes_limits):
+        """Plot overlaid Poisson comparisons from all samples."""
+        if not self.use_poisson:
+            return
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        colors = plt.cm.Set2(np.linspace(0, 1, len(self.samples)))
+        x_range = np.arange(0, axes_limits["poisson_x_max"] + 1)
+        n_s = len(self.samples)
+        bar_width = 0.8 / n_s
+
+        for i, sample in enumerate(self.samples):
+            actual = sample["df"]["inclusions"].value_counts().sort_index()
+            n_drop = len(sample["df"])
+            detected_pct = [actual.get(k, 0) / n_drop * 100 for k in x_range]
+            offset = (i - n_s / 2 + 0.5) * bar_width
+            ax.bar(x_range + offset, detected_pct, bar_width,
+                   label=sample["label"], color=colors[i], alpha=0.8)
+
+        ax.set_xlabel("Inclusions per Droplet")
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title("Inclusion Distribution (All Samples)")
+        ax.set_xticks(x_range)
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        plt.savefig(output_path / "poisson_comparison.png", dpi=200)
+        plt.close()
+
+    def create_summary_report(self, output_path, all_stats, axes_limits):
+        """Create combined summary_report.png with table, overlaid plots, CV barplot."""
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        colors = plt.cm.Set2(np.linspace(0, 1, len(self.samples)))
+
+        # [0,0]: Comparison table
+        ax_table = axes[0, 0]
+        ax_table.axis("off")
+        columns = [s["label"] for s in all_stats]
+
+        rows = ["Droplets", "Mean (um)", "Median (um)", "Std (um)", "CV (%)"]
+        if self.use_inclusions:
+            rows.extend(["Inclusions", "Mean/droplet"])
+
+        cell_data = []
+        for row_name in rows:
+            row_vals = []
+            for s in all_stats:
+                if row_name == "Droplets":
+                    row_vals.append(f"{s['total_droplets']:,}")
+                elif row_name == "Mean (um)":
+                    row_vals.append(f"{s['mean_d']:.1f}")
+                elif row_name == "Median (um)":
+                    row_vals.append(f"{s['median_d']:.1f}")
+                elif row_name == "Std (um)":
+                    row_vals.append(f"{s['std_d']:.1f}")
+                elif row_name == "CV (%)":
+                    row_vals.append(f"{s['cv']:.1f}")
+                elif row_name == "Inclusions":
+                    row_vals.append(f"{s['total_inclusions']:,}")
+                elif row_name == "Mean/droplet":
+                    mean_inc = s["total_inclusions"] / s["total_droplets"] if s["total_droplets"] > 0 else 0
+                    row_vals.append(f"{mean_inc:.2f}")
+            cell_data.append(row_vals)
+
+        table = ax_table.table(cellText=cell_data, rowLabels=rows, colLabels=columns,
+                               loc="center", cellLoc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.0, 1.4)
+        ax_table.set_title("Sample Comparison", fontweight="bold")
+
+        # [0,1]: Overlaid size distribution
+        ax_size = axes[0, 1]
+        bins = axes_limits["bins"]
+        for i, sample in enumerate(self.samples):
+            ax_size.hist(sample["df"]["diameter_um"].values, bins=bins,
+                         color=colors[i], edgecolor="black", alpha=0.5, label=sample["label"])
+        ax_size.set_xlabel("Diameter (um)")
+        ax_size.set_ylabel("Count")
+        ax_size.set_title("Size Distribution")
+        ax_size.legend()
+        ax_size.grid(True, alpha=0.3)
+
+        # [1,0]: CV barplot
+        ax_cv = axes[1, 0]
+        labels = [s["label"] for s in all_stats]
+        cvs = [s["cv"] for s in all_stats]
+        ax_cv.bar(labels, cvs, color=colors[:len(labels)], edgecolor="black", alpha=0.8)
+        ax_cv.set_ylabel("CV (%)")
+        ax_cv.set_title("Coefficient of Variation")
+        ax_cv.grid(True, alpha=0.3, axis="y")
+        for j, v in enumerate(cvs):
+            ax_cv.text(j, v + 0.3, f"{v:.1f}%", ha="center", fontsize=9)
+
+        # [1,1]: Overlaid Poisson or placeholder
+        ax_poisson = axes[1, 1]
+        if self.use_poisson:
+            x_range = np.arange(0, axes_limits["poisson_x_max"] + 1)
+            n_s = len(self.samples)
+            bw = 0.8 / n_s
+            for i, sample in enumerate(self.samples):
+                actual = sample["df"]["inclusions"].value_counts().sort_index()
+                n_drop = len(sample["df"])
+                detected_pct = [actual.get(k, 0) / n_drop * 100 for k in x_range]
+                offset = (i - n_s / 2 + 0.5) * bw
+                ax_poisson.bar(x_range + offset, detected_pct, bw,
+                               label=sample["label"], color=colors[i], alpha=0.8)
+            ax_poisson.set_xlabel("Inclusions per Droplet")
+            ax_poisson.set_ylabel("Percentage (%)")
+            ax_poisson.set_title("Inclusion Distribution")
+            ax_poisson.set_xticks(x_range)
+            ax_poisson.legend()
+            ax_poisson.grid(True, alpha=0.3, axis="y")
+        else:
+            ax_poisson.axis("off")
+            ax_poisson.text(0.5, 0.5, "Poisson: OFF", ha="center", va="center",
+                            fontsize=14, transform=ax_poisson.transAxes)
+
+        plt.suptitle("DropDrop Multiplex Report", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(output_path / "summary_report.png", dpi=200, bbox_inches="tight")
+        plt.close()
+
+    def write_merged_summary(self, output_path, all_stats):
+        """Write merged summary.txt."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            "=" * 80,
+            "DROPDROP MULTIPLEX ANALYSIS SUMMARY".center(80),
+            "=" * 80,
+            "",
+            f"Date: {timestamp}",
+            f"Samples: {len(self.samples)}",
+            f"Inclusions: {'ON' if self.use_inclusions else 'OFF'}",
+            f"Poisson: {'ON' if self.use_poisson else 'OFF'}",
+            "",
+        ]
+
+        for s in all_stats:
+            lines.extend([
+                f"--- {s['label']} ---",
+                f"  Droplets: {s['total_droplets']:,}",
+                f"  Mean Diameter: {s['mean_d']:.1f} um",
+                f"  Median Diameter: {s['median_d']:.1f} um",
+                f"  Std Deviation: {s['std_d']:.1f} um",
+                f"  CV: {s['cv']:.1f}%",
+            ])
+            if self.use_inclusions:
+                mean_inc = s["total_inclusions"] / s["total_droplets"] if s["total_droplets"] > 0 else 0
+                lines.extend([
+                    f"  Inclusions: {s['total_inclusions']:,}",
+                    f"  Mean/Droplet: {mean_inc:.2f}",
+                ])
+            if self.use_poisson and s.get("lambda_val") is not None:
+                lines.append(f"  Lambda: {s['lambda_val']:.4f}")
+                if s.get("p_value") is not None:
+                    result = "FOLLOWS" if s["p_value"] > 0.05 else "DEVIATES FROM"
+                    lines.append(f"  Chi-squared: {s['chi2']:.2f}, p={s['p_value']:.4f} -> {result} Poisson")
+            lines.append("")
+
+        lines.extend([
+            "=" * 80,
+            "Generated by DropDrop (Multiplex Mode)",
+            "=" * 80,
+        ])
+
+        with open(output_path / "summary.txt", "w") as f:
+            f.write("\n".join(lines))
+
+    def run_analysis(self, output_path):
+        """Run complete multiplex analysis."""
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        all_stats = self.compute_per_sample_stats()
+        axes_limits = self.compute_global_axes()
+
+        # Merged CSV
+        merged_df = self.merge_dataframes()
+        merged_df.to_csv(output_path / "data.csv", index=False)
+
+        # Overlaid plots
+        self.plot_overlaid_size_distribution(output_path, axes_limits)
+        if self.use_poisson:
+            self.plot_overlaid_poisson(output_path, axes_limits)
+
+        # Summary report and text
+        self.create_summary_report(output_path, all_stats, axes_limits)
+        self.write_merged_summary(output_path, all_stats)
+
+        # Console output
+        print("\nMULTIPLEX SUMMARY")
+        print("=" * 50)
+        for s in all_stats:
+            line = f"  {s['label']}: {s['total_droplets']} droplets, mean={s['mean_d']:.1f}um, CV={s['cv']:.1f}%"
+            if self.use_inclusions:
+                line += f", inclusions={s['total_inclusions']}"
+            print(line)
+        print(f"\nOutput: {output_path}")
