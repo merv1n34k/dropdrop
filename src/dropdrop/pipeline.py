@@ -17,7 +17,8 @@ from .config import load_config
 class DropletInclusionPipeline:
     """Main pipeline for droplet and inclusion detection."""
 
-    def __init__(self, config=None, store_visualizations=False, use_cache=True, sample_count=3):
+    def __init__(self, config=None, store_visualizations=False, use_cache=True,
+                 sample_count=3, detect_inclusions=True):
         """Initialize pipeline with configuration.
 
         Args:
@@ -25,6 +26,7 @@ class DropletInclusionPipeline:
             store_visualizations: Whether to store visualization data for UI.
             use_cache: Whether to use caching for expensive computations.
             sample_count: Number of sample frames to store for report (default 3).
+            detect_inclusions: Whether to detect inclusions inside droplets.
         """
         self.config = config if config else load_config()
         self.results_data = []
@@ -34,6 +36,7 @@ class DropletInclusionPipeline:
         self.sample_frames = {}  # Always store a few samples for report
         self.use_cache = use_cache
         self.cache = CacheManager(self.config) if use_cache else None
+        self.detect_inclusions = detect_inclusions
         self._cellpose_model = None
 
     def parse_filename(self, filename):
@@ -299,17 +302,21 @@ class DropletInclusionPipeline:
             if np.sum(eroded_mask) == 0:
                 continue
 
-            if store_viz:
-                inclusion_mask, inclusion_count, blackhat = (
-                    self.detect_inclusions_in_droplet(
-                        min_projection, eroded_mask, store_masked=True
+            inclusion_count = 0
+            inclusion_mask = np.zeros_like(droplet_mask)
+
+            if self.detect_inclusions:
+                if store_viz:
+                    inclusion_mask, inclusion_count, blackhat = (
+                        self.detect_inclusions_in_droplet(
+                            min_projection, eroded_mask, store_masked=True
+                        )
                     )
-                )
-                frame_viz["masked_images"].append(blackhat)
-            else:
-                inclusion_mask, inclusion_count = self.detect_inclusions_in_droplet(
-                    min_projection, eroded_mask
-                )
+                    frame_viz["masked_images"].append(blackhat)
+                else:
+                    inclusion_mask, inclusion_count = self.detect_inclusions_in_droplet(
+                        min_projection, eroded_mask
+                    )
 
             if store_viz:
                 frame_viz["droplet_masks"].append({
@@ -414,7 +421,10 @@ class DropletInclusionPipeline:
 
     def print_summary(self, df):
         """Print one-line summary."""
-        print(
-            f"\nDetected {len(df)} droplets with {df['inclusions'].sum()} inclusions "
-            f"({df['inclusions'].mean():.2f} per droplet)"
-        )
+        if self.detect_inclusions:
+            print(
+                f"\nDetected {len(df)} droplets with {df['inclusions'].sum()} inclusions "
+                f"({df['inclusions'].mean():.2f} per droplet)"
+            )
+        else:
+            print(f"\nDetected {len(df)} droplets (inclusion detection OFF)")

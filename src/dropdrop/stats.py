@@ -31,7 +31,8 @@ class DropletStatistics:
 
         self.bead_count = self.settings.get("count", 6.5e5)
         self.dilution = self.settings.get("dilution", 1000)
-        self.use_poisson = self.settings.get("poisson", True)
+        self.use_inclusions = self.settings.get("inclusions", True)
+        self.use_poisson = self.settings.get("poisson", True) and self.use_inclusions
 
     def calculate_poisson(self, median_diameter_um):
         """Calculate theoretical Poisson distribution."""
@@ -273,12 +274,21 @@ class DropletStatistics:
             f"Frames: {total_frames}",
             "",
             f"Droplets: {total_droplets:,}",
-            f"Inclusions: {total_inclusions:,}",
-            f"Mean/droplet: {total_inclusions / total_droplets:.2f}",
-            f"With incl: {with_inclusions / total_droplets * 100:.1f}%",
-            "",
-            f"Diameter: {stats_data['mean_d']:.1f} ± {stats_data['std_d']:.1f} µm",
         ]
+
+        if self.use_inclusions:
+            stats_lines.extend([
+                f"Inclusions: {total_inclusions:,}",
+                f"Mean/droplet: {total_inclusions / total_droplets:.2f}",
+                f"With incl: {with_inclusions / total_droplets * 100:.1f}%",
+            ])
+        else:
+            stats_lines.append("Inclusions: OFF")
+
+        stats_lines.extend([
+            "",
+            f"Diameter: {stats_data['mean_d']:.1f} +/- {stats_data['std_d']:.1f} um",
+        ])
 
         if self.use_poisson and stats_data.get("lambda_val") is not None:
             stats_lines.extend([
@@ -359,8 +369,8 @@ class DropletStatistics:
             lambda_val, chi2, p_value = self.plot_poisson_comparison(output_path)
 
         total_droplets = len(self.df)
-        total_inclusions = int(self.df["inclusions"].sum())
-        with_inclusions = int((self.df["inclusions"] > 0).sum())
+        total_inclusions = int(self.df["inclusions"].sum()) if self.use_inclusions else 0
+        with_inclusions = int((self.df["inclusions"] > 0).sum()) if self.use_inclusions else 0
         std_d = self.df["diameter_um"].std()
 
         self._write_summary(
@@ -391,12 +401,16 @@ class DropletStatistics:
         print("-" * 40)
         print(f"Droplets: {total_droplets}")
         print(f"Mean diameter: {mean_d:.1f} µm")
-        print(
-            f"Inclusions: {total_inclusions} total, {total_inclusions / total_droplets:.2f} per droplet"
-        )
-        print(
-            f"With inclusions: {with_inclusions} ({with_inclusions / total_droplets * 100:.1f}%)"
-        )
+
+        if self.use_inclusions:
+            print(
+                f"Inclusions: {total_inclusions} total, {total_inclusions / total_droplets:.2f} per droplet"
+            )
+            print(
+                f"With inclusions: {with_inclusions} ({with_inclusions / total_droplets * 100:.1f}%)"
+            )
+        else:
+            print("Inclusions: OFF")
 
         if self.use_poisson and lambda_val is not None:
             print(f"Theoretical λ: {lambda_val:.3f}")
@@ -429,6 +443,7 @@ class DropletStatistics:
             "",
             "SETTINGS",
             "-" * 40,
+            f"Inclusion Detection: {'ON' if self.use_inclusions else 'OFF'}",
             f"Poisson Analysis: {'ON' if self.use_poisson else 'OFF'}",
         ]
 
@@ -444,17 +459,21 @@ class DropletStatistics:
             "-" * 40,
             f"Total Frames Processed: {total_frames}",
             f"Total Droplets Detected: {stats['total_droplets']:,}",
-            f"Total Beads Detected: {stats['total_inclusions']:,}",
             "",
             "Droplet Statistics:",
             f"  Mean Diameter: {stats['mean_d']:.1f} um",
             f"  Median Diameter: {stats['median_d']:.1f} um",
             f"  Std Deviation: {stats['std_d']:.1f} um",
-            "",
-            "Bead Statistics:",
-            f"  Mean per Droplet: {stats['total_inclusions'] / stats['total_droplets']:.2f}",
-            f"  Droplets with Beads: {stats['with_inclusions']} ({stats['with_inclusions'] / stats['total_droplets'] * 100:.1f}%)",
         ])
+
+        if self.use_inclusions:
+            lines.extend([
+                "",
+                "Bead Statistics:",
+                f"  Total Beads Detected: {stats['total_inclusions']:,}",
+                f"  Mean per Droplet: {stats['total_inclusions'] / stats['total_droplets']:.2f}",
+                f"  Droplets with Beads: {stats['with_inclusions']} ({stats['with_inclusions'] / stats['total_droplets'] * 100:.1f}%)",
+            ])
 
         if self.use_poisson and stats.get("lambda_val") is not None:
             lines.extend([

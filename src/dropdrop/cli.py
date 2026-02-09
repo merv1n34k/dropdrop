@@ -30,6 +30,7 @@ def parse_settings(settings_str):
         "poisson": True,
         "count": 6.5e5,
         "label": None,
+        "inclusions": True,
     }
 
     if not settings_str:
@@ -44,6 +45,8 @@ def parse_settings(settings_str):
         "count": "count",
         "l": "label",
         "label": "label",
+        "i": "inclusions",
+        "inclusions": "inclusions",
     }
 
     for part in settings_str.split(","):
@@ -60,19 +63,28 @@ def parse_settings(settings_str):
             settings["count"] = float(value)
         elif key == "label":
             settings["label"] = value.strip()
+        elif key == "inclusions":
+            settings["inclusions"] = value.lower() in ("on", "yes", "true", "1")
 
     return settings
 
 
 def prompt_settings():
     """Interactive prompts for settings when --settings not provided."""
-    settings = {"dilution": 500, "poisson": True, "count": 6.5e5, "label": None}
+    settings = {"dilution": 500, "poisson": True, "count": 6.5e5, "label": None, "inclusions": True}
 
     print("\n--- Project Settings ---")
 
-    # Poisson analysis
-    use_poisson = input("Use Poisson analysis? [yes/no] (yes): ").strip().lower()
-    settings["poisson"] = use_poisson != "no"
+    # Inclusion detection
+    use_inclusions = input("Detect inclusions? [yes/no] (yes): ").strip().lower()
+    settings["inclusions"] = use_inclusions != "no"
+
+    # Poisson analysis (only if inclusions enabled)
+    if settings["inclusions"]:
+        use_poisson = input("Use Poisson analysis? [yes/no] (yes): ").strip().lower()
+        settings["poisson"] = use_poisson != "no"
+    else:
+        settings["poisson"] = False
 
     if settings["poisson"]:
         # Bead count
@@ -130,7 +142,7 @@ def main():
         "--settings",
         type=str,
         default=None,
-        help='Compact settings: "d=1000,p=on,c=6.5e5,l=label" (d=dilution, p=poisson, c=count, l=label)',
+        help='Compact settings: "d=1000,p=on,c=6.5e5,l=label,i=on" (d=dilution, p=poisson, c=count, l=label, i=inclusions)',
     )
 
     viewer_group = parser.add_mutually_exclusive_group()
@@ -138,8 +150,8 @@ def main():
         "--view", action="store_true", help="Enable interactive viewer after processing"
     )
     viewer_group.add_argument(
-        "-i",
-        "--interactive",
+        "-e",
+        "--edit",
         action="store_true",
         help="Interactive inclusion correction mode",
     )
@@ -193,17 +205,22 @@ def main():
     # Initialize and run pipeline
     print(f"Input directory: {args.input_dir}")
     print(f"Output directory: {output_dir}")
-    if settings["poisson"]:
+    print(f"Inclusions: {'ON' if settings['inclusions'] else 'OFF'}")
+    if settings["inclusions"] and settings["poisson"]:
         print(f"Poisson: ON (count={settings['count']:.2e}, dilution={settings['dilution']})")
-    else:
+    elif settings["inclusions"]:
         print("Poisson: OFF")
     if args.number:
         print(f"Frame limit: {args.number}")
 
     # Create pipeline with visualization storage if viewer is requested
-    store_viz = args.view or args.interactive
+    store_viz = args.view or args.edit
     use_cache = not args.no_cache
-    pipeline = DropletInclusionPipeline(store_visualizations=store_viz, use_cache=use_cache)
+    detect_inclusions = settings["inclusions"]
+    pipeline = DropletInclusionPipeline(
+        store_visualizations=store_viz, use_cache=use_cache,
+        detect_inclusions=detect_inclusions,
+    )
 
     # Handle cache clear request
     if args.clear_cache and pipeline.cache:
@@ -214,8 +231,8 @@ def main():
     if results:
         print("\nPipeline completed successfully!")
 
-        # Interactive editing mode
-        if args.interactive and pipeline.visualization_data:
+        # Interactive editing mode (only when inclusions enabled)
+        if args.edit and detect_inclusions and pipeline.visualization_data:
             print("\nLaunching interactive inclusion editor...")
             editor = InclusionEditor(pipeline.visualization_data, results)
             results = editor.run()  # Update results with manual corrections
