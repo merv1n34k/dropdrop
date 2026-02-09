@@ -13,6 +13,8 @@ from .pipeline import DropletInclusionPipeline
 from .stats import DropletStatistics
 from .ui import Editor
 
+QUEUE_FILE = "queue.tmp"
+
 
 def prompt_settings(config=None):
     """Interactive prompts for project settings.
@@ -82,6 +84,174 @@ def generate_project_name(settings):
     return date_str
 
 
+def discover_subdirectories(parent_dir):
+    """List subdirectories and prompt for labels. Skip if Enter is empty."""
+    parent = Path(parent_dir)
+    subdirs = sorted([d for d in parent.iterdir() if d.is_dir()])
+
+    if not subdirs:
+        print(f"ERROR: No subdirectories found in '{parent_dir}'")
+        return []
+
+    print(f"\nFound {len(subdirs)} directories in {parent_dir}:")
+    queue = []
+    for d in subdirs:
+        label = input(f"  {d.name} -> label (Enter to skip): ").strip()
+        if label:
+            queue.append({"path": str(d.resolve()), "label": label, "status": "pending"})
+
+    if not queue:
+        print("No directories selected.")
+
+    return queue
+
+
+def write_queue(queue):
+    """Write queue to queue.tmp file."""
+    with open(QUEUE_FILE, "w") as f:
+        for entry in queue:
+            f.write(f"{entry['path']}\t{entry['label']}\t{entry['status']}\n")
+
+
+def read_queue():
+    """Read queue from queue.tmp file."""
+    queue_path = Path(QUEUE_FILE)
+    if not queue_path.exists():
+        return None
+
+    queue = []
+    for line in queue_path.read_text().strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) == 3:
+            queue.append({"path": parts[0], "label": parts[1], "status": parts[2]})
+    return queue
+
+
+def update_queue_status(queue, index):
+    """Mark queue entry as done and rewrite file."""
+    queue[index]["status"] = "done"
+    write_queue(queue)
+
+
+def cleanup_queue():
+    """Remove queue.tmp file."""
+    queue_path = Path(QUEUE_FILE)
+    if queue_path.exists():
+        queue_path.unlink()
+        print(f"Queue file removed: {QUEUE_FILE}")
+
+
+def process_single_directory(input_dir, output_dir, settings, args, cellpose_model=None):
+    """Process a single input directory through the pipeline.
+
+    Returns the cellpose model for reuse across multiplex runs.
+    """
+    detect_inclusions = settings["inclusions"]
+    store_viz = args.edit
+    use_cache = not args.no_cache
+
+    pipeline = DropletInclusionPipeline(
+        store_visualizations=store_viz, use_cache=use_cache,
+        detect_inclusions=detect_inclusions,
+    )
+
+    # Reuse cellpose model across runs
+    if cellpose_model is not None:
+        pipeline._cellpose_model = cellpose_model
+
+    # Handle cache clear request
+    if args.clear_cache and pipeline.cache:
+        pipeline.cache.clear()
+
+    results = pipeline.run(input_dir, str(output_dir), frame_limit=args.number)
+
+    if results:
+        print("\nPipeline completed successfully!")
+
+        # Interactive editor
+        if args.edit and pipeline.visualization_data:
+            print("\nLaunching editor...")
+            editor = Editor(pipeline.visualization_data, results, detect_inclusions=detect_inclusions)
+            results = editor.run()
+
+            # Save updated results
+            df = pd.DataFrame(results)
+            csv_path = output_dir / "data.csv"
+            df.to_csv(csv_path, index=False)
+            print(f"Updated results saved to: {csv_path}")
+
+        # Always generate statistics (after any interactive corrections)
+        print("\nGenerating statistical analysis...")
+        csv_path = output_dir / "data.csv"
+
+        # Extract sample frames for report
+        sample_frames = None
+        if pipeline.sample_frames:
+            sample_frames = []
+            for idx in sorted(pipeline.sample_frames.keys()):
+                viz = pipeline.sample_frames[idx]
+                sample_frames.append({
+                    "frame_idx": idx,
+                    "image": viz["min_projection"],
+                    "droplet_masks": viz.get("droplet_masks", []),
+                    "inclusion_masks": viz.get("inclusion_masks", []),
+                })
+
+        stats_module = DropletStatistics(csv_path, settings)
+        stats_module.run_analysis(str(output_dir), sample_frames)
+
+        # Archive project if requested
+        if args.gzip:
+            archive_name = f"{output_dir}.tar.gz"
+            print(f"\nArchiving project to: {archive_name}")
+            with tarfile.open(archive_name, "w:gz") as tar:
+                tar.add(output_dir, arcname=output_dir.name)
+            print(f"Archive created: {archive_name}")
+
+    return pipeline._cellpose_model
+
+
+def process_queue(queue, settings, args):
+    """Process all pending entries in a queue."""
+    pending = [(i, e) for i, e in enumerate(queue) if e["status"] == "pending"]
+
+    if not pending:
+        print("No pending directories to process.")
+        cleanup_queue()
+        return
+
+    print(f"\nProcessing {len(pending)} directories...")
+    cellpose_model = None
+
+    for i, entry in pending:
+        label = entry["label"]
+        input_dir = entry["path"]
+
+        # Override label in settings for this run
+        run_settings = settings.copy()
+        run_settings["label"] = label
+        run_settings["input_dir"] = str(Path(input_dir).resolve())
+
+        output_dir = Path("results") / generate_project_name(run_settings)
+
+        print(f"\n{'='*60}")
+        print(f"[{i+1}/{len(queue)}] {Path(input_dir).name} -> {label}")
+        print(f"  Input:  {input_dir}")
+        print(f"  Output: {output_dir}")
+        print(f"{'='*60}")
+
+        cellpose_model = process_single_directory(
+            input_dir, output_dir, run_settings, args, cellpose_model
+        )
+
+        update_queue_status(queue, i)
+
+    cleanup_queue()
+    print(f"\nAll {len(pending)} directories processed.")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -89,7 +259,8 @@ def main():
     )
 
     parser.add_argument(
-        "input_dir", type=str, help="Input directory containing z-stack images"
+        "input_dir", type=str, nargs="?", default=None,
+        help="Input directory containing z-stack images",
     )
 
     parser.add_argument(
@@ -98,6 +269,21 @@ def main():
         nargs="?",
         default=None,
         help="Output directory (default: ./results/<date>_<label>)",
+    )
+
+    parser.add_argument(
+        "-m",
+        "--multiplex",
+        type=str,
+        default=None,
+        help="Parent directory containing sample subdirectories for batch processing",
+    )
+
+    parser.add_argument(
+        "-r",
+        "--resurrect",
+        action="store_true",
+        help=f"Resume processing from existing {QUEUE_FILE}",
     )
 
     parser.add_argument(
@@ -132,12 +318,54 @@ def main():
     )
     args = parser.parse_args()
 
-    # Check input directory exists
+    # Validate argument combinations
+    if args.resurrect and (args.input_dir or args.multiplex):
+        print("ERROR: --resurrect cannot be used with input_dir or --multiplex")
+        sys.exit(1)
+    if args.multiplex and args.input_dir:
+        print("ERROR: Cannot use both input_dir and --multiplex")
+        sys.exit(1)
+    if not args.resurrect and not args.multiplex and not args.input_dir:
+        parser.print_help()
+        sys.exit(1)
+
+    # --- Resurrect mode ---
+    if args.resurrect:
+        queue = read_queue()
+        if queue is None:
+            print(f"ERROR: No {QUEUE_FILE} found. Nothing to resume.")
+            sys.exit(1)
+
+        pending_count = sum(1 for e in queue if e["status"] == "pending")
+        print(f"Resuming from {QUEUE_FILE}: {pending_count}/{len(queue)} pending")
+
+        settings = prompt_settings()
+        process_queue(queue, settings, args)
+        return
+
+    # --- Multiplex mode ---
+    if args.multiplex:
+        parent_dir = args.multiplex
+        if not Path(parent_dir).exists():
+            print(f"ERROR: Directory '{parent_dir}' does not exist")
+            sys.exit(1)
+
+        queue = discover_subdirectories(parent_dir)
+        if not queue:
+            return
+
+        write_queue(queue)
+        print(f"\nQueue saved to {QUEUE_FILE} ({len(queue)} entries)")
+
+        settings = prompt_settings()
+        process_queue(queue, settings, args)
+        return
+
+    # --- Single directory mode ---
     if not Path(args.input_dir).exists():
         print(f"ERROR: Input directory '{args.input_dir}' does not exist")
         sys.exit(1)
 
-    # Get settings via interactive prompts
     settings = prompt_settings()
 
     # Determine output directory
@@ -147,10 +375,9 @@ def main():
         project_name = generate_project_name(settings)
         output_dir = Path("results") / project_name
 
-    # Store settings for later use
     settings["input_dir"] = str(Path(args.input_dir).resolve())
 
-    # Initialize and run pipeline
+    # Print summary
     print(f"Input directory: {args.input_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Inclusions: {'ON' if settings['inclusions'] else 'OFF'}")
@@ -161,63 +388,7 @@ def main():
     if args.number:
         print(f"Frame limit: {args.number}")
 
-    # Create pipeline with visualization storage if editor is requested
-    store_viz = args.edit
-    use_cache = not args.no_cache
-    detect_inclusions = settings["inclusions"]
-    pipeline = DropletInclusionPipeline(
-        store_visualizations=store_viz, use_cache=use_cache,
-        detect_inclusions=detect_inclusions,
-    )
-
-    # Handle cache clear request
-    if args.clear_cache and pipeline.cache:
-        pipeline.cache.clear()
-
-    results = pipeline.run(args.input_dir, str(output_dir), frame_limit=args.number)
-
-    if results:
-        print("\nPipeline completed successfully!")
-
-        # Interactive editor
-        if args.edit and pipeline.visualization_data:
-            print("\nLaunching editor...")
-            editor = Editor(pipeline.visualization_data, results, detect_inclusions=detect_inclusions)
-            results = editor.run()
-
-            # Save updated results
-            df = pd.DataFrame(results)
-            csv_path = output_dir / "data.csv"
-            df.to_csv(csv_path, index=False)
-            print(f"Updated results saved to: {csv_path}")
-
-        # Always generate statistics (after any interactive corrections)
-        print("\nGenerating statistical analysis...")
-        csv_path = output_dir / "data.csv"
-
-        # Extract sample frames for report (always available from pipeline)
-        sample_frames = None
-        if pipeline.sample_frames:
-            sample_frames = []
-            for idx in sorted(pipeline.sample_frames.keys()):
-                viz = pipeline.sample_frames[idx]
-                sample_frames.append({
-                    "frame_idx": idx,
-                    "image": viz["min_projection"],
-                    "droplet_masks": viz.get("droplet_masks", []),
-                    "inclusion_masks": viz.get("inclusion_masks", []),
-                })
-
-        stats_module = DropletStatistics(csv_path, settings)
-        stats_module.run_analysis(str(output_dir), sample_frames)
-
-        # Archive project if requested
-        if args.gzip:
-            archive_name = f"{output_dir}.tar.gz"
-            print(f"\nArchiving project to: {archive_name}")
-            with tarfile.open(archive_name, "w:gz") as tar:
-                tar.add(output_dir, arcname=output_dir.name)
-            print(f"Archive created: {archive_name}")
+    process_single_directory(args.input_dir, output_dir, settings, args)
 
 
 if __name__ == "__main__":
