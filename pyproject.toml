@@ -1,6 +1,6 @@
 [project]
 name = "dropdrop"
-version = "2.0.0"
+version = "2.0.1"
 description = "Automated pipeline for detecting droplets and inclusions in microscopy images, powered by Cellpose"
 readme = "README.md"
 license = "MIT"
