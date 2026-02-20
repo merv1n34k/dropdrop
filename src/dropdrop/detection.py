@@ -110,11 +110,23 @@ class Detection:
         # Lazy import and model caching
         if self._cellpose_model is None:
             try:
+                from cellpose.core import use_gpu
                 from cellpose.models import CellposeModel
             except ImportError:
                 print("ERROR: Cellpose is required for droplet detection.")
                 print("Install with: pip install cellpose")
                 sys.exit(1)
+
+            if not use_gpu():
+                import platform
+                os_name = platform.system()
+                if os_name in ("Linux", "Windows"):
+                    print("WARNING: CUDA is not available. Cellpose will run on CPU (slow).")
+                    print("Install CUDA-enabled PyTorch:")
+                    print("  uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126")
+                else:
+                    print("WARNING: No GPU detected. Cellpose will run on CPU (slow).")
+
             self._cellpose_model = CellposeModel(gpu=True)
 
         masks, flows, styles = self._cellpose_model.eval(

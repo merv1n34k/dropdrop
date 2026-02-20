@@ -14,6 +14,20 @@ uv pip install dropdrop
 pip install dropdrop
 ```
 
+### GPU support (CUDA)
+
+On Linux/Windows with an NVIDIA GPU, install CUDA-enabled PyTorch **before** installing DropDrop:
+
+```bash
+# Install PyTorch with CUDA 12.6 (adjust version for your driver)
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
+# Then install DropDrop
+uv pip install dropdrop
+```
+
+On macOS, GPU acceleration via Metal (MPS) is included in the default PyTorch build — no extra steps needed.
+
 ### From source
 
 ```bash
