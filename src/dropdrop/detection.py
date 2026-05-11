@@ -18,14 +18,14 @@ class Detection:
     """Main pipeline for droplet and inclusion detection."""
 
     def __init__(self, config=None, store_visualizations=False, use_cache=True,
-                 sample_count=3, detect_inclusions=True):
+                 sample_count=32, detect_inclusions=True):
         """Initialize pipeline with configuration.
 
         Args:
             config: Configuration dict. If None, loads from config.json.
             store_visualizations: Whether to store visualization data for UI.
             use_cache: Whether to use caching for expensive computations.
-            sample_count: Number of sample frames to store for report (default 3).
+            sample_count: Number of sample frames to store for report (default 32).
             detect_inclusions: Whether to detect inclusions inside droplets.
         """
         self.config = config if config else load_config()

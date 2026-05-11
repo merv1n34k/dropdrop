@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -21,8 +22,8 @@ plt.rcParams["savefig.dpi"] = 300
 class Analysis:
     """Statistical analysis — auto-discovers .tmp_* dirs in output directory.
 
-    Single sample  → individual report with sample frames
-    Multiple samples → multiplex report with overlaid plots and collage
+    Single sample  → report.png (stats) + report.pdf (cover, stats, sample grid)
+    Multiple samples → summary_report.png (stats) + summary_report.pdf (cover, stats, per-sample grids)
     """
 
     def __init__(self, output_dir, settings):
@@ -162,9 +163,11 @@ class Analysis:
         if self.use_poisson:
             self._plot_poisson_comparison(df, sample_stats)
 
-        # Combined report with sample frames
-        sample_pngs = self._load_sample_pngs(sample)
-        self._create_single_report(sample_stats, sample_pngs)
+        # Combined report (stats only, frames go in PDF)
+        self._create_single_report(sample_stats)
+
+        # PDF report with cover, stats, and sample frame grid
+        self._generate_pdf([sample_stats])
 
         # Summary text
         self._write_single_summary(sample_stats)
@@ -226,119 +229,62 @@ class Analysis:
         plt.savefig(self.output_dir / "poisson_comparison.png", dpi=200)
         plt.close()
 
-    def _create_single_report(self, sample_stats, sample_pngs):
-        """Create combined report.png with plots, stats, and sample frames."""
+    def _create_single_report(self, sample_stats):
+        """Create report.png with table, size dist, Poisson, and stats text (2x2 grid)."""
         df = self.samples[0]["df"]
-        n_frames = len(sample_pngs)
 
-        if self.use_poisson:
-            n_cols = max(3, n_frames)
-            fig = plt.figure(figsize=(5 * n_cols, 10))
-            gs = fig.add_gridspec(2, n_cols, height_ratios=[1, 1])
-            ax_size = fig.add_subplot(gs[0, 0])
-            ax_poisson = fig.add_subplot(gs[0, 1])
-            ax_stats = fig.add_subplot(gs[0, 2])
-        else:
-            n_cols = max(2, n_frames)
-            fig = plt.figure(figsize=(5 * n_cols, 10))
-            gs = fig.add_gridspec(2, n_cols, height_ratios=[1, 1])
-            ax_size = fig.add_subplot(gs[0, 0])
-            ax_stats = fig.add_subplot(gs[0, 1])
-            ax_poisson = None
+        fig = plt.figure(figsize=(14, 10))
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1])
 
-        # Size distribution
-        diameters = df["diameter_um"].values
-        ax_size.hist(diameters, bins=25, color="steelblue", edgecolor="black", alpha=0.7)
-        ax_size.axvline(sample_stats["mean_d"], color="red", linestyle="--",
-                        label=f"Mean: {sample_stats['mean_d']:.1f}")
-        ax_size.axvline(sample_stats["median_d"], color="green", linestyle="--",
-                        label=f"Median: {sample_stats['median_d']:.1f}")
-        ax_size.set_xlabel("Diameter (um)")
-        ax_size.set_ylabel("Count")
-        ax_size.set_title("Droplet Size Distribution")
-        ax_size.legend()
-        ax_size.grid(True, alpha=0.3)
-
-        # Poisson comparison
-        if ax_poisson is not None and sample_stats.get("lambda_val") is not None:
-            median_d = df["diameter_um"].median()
-            x_range, theoretical, lambda_val = self._calculate_poisson(df, median_d)
-            actual = df["inclusions"].value_counts().sort_index()
-            n_droplets = len(df)
-            detected_pct = [actual.get(i, 0) / n_droplets * 100 for i in x_range]
-            theoretical_pct = theoretical * 100
-
-            x = np.arange(len(x_range))
-            width = 0.35
-            ax_poisson.bar(x - width / 2, detected_pct, width,
-                           label="Detected", color="royalblue", alpha=0.8)
-            ax_poisson.bar(x + width / 2, theoretical_pct[:len(x)], width,
-                           label=f"Poisson (l={lambda_val:.3f})", color="coral", alpha=0.8)
-            if sample_stats.get("p_value") is not None:
-                result_text = f"X2 = {sample_stats['chi2']:.2f}, p = {sample_stats['p_value']:.4f}"
-                result_text += "\nFollows Poisson" if sample_stats["p_value"] > 0.05 else "\nDeviates"
-                ax_poisson.text(0.98, 0.85, result_text, transform=ax_poisson.transAxes,
-                                ha="right", va="top", fontsize=10,
-                                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8))
-            ax_poisson.set_xlabel("Inclusions per Droplet")
-            ax_poisson.set_ylabel("Percentage (%)")
-            ax_poisson.set_title("Inclusion Distribution")
-            ax_poisson.set_xticks(x)
-            ax_poisson.set_xticklabels(x_range)
-            ax_poisson.legend()
-            ax_poisson.grid(True, alpha=0.3, axis="y")
-
-        # Stats text box
-        project_name = self.output_dir.name
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        total_frames = df["frame"].nunique()
-        total_droplets = len(df)
-
-        stats_lines = [
-            f"Project: {project_name}",
-            f"Date: {timestamp}",
-            f"Frames: {total_frames}",
-            "",
-            f"Droplets: {total_droplets:,}",
+        # [0,0]: Stats table
+        ax_table = fig.add_subplot(gs[0, 0])
+        ax_table.axis("off")
+        s = sample_stats
+        rows = ["Droplets", "Mean (um)", "Median (um)", "Std (um)", "CV (%)"]
+        vals = [
+            f"{s['total_droplets']:,}",
+            f"{s['mean_d']:.1f}",
+            f"{s['median_d']:.1f}",
+            f"{s['std_d']:.1f}",
+            f"{s['cv']:.1f}",
         ]
-
         if self.use_inclusions:
-            stats_lines.extend([
-                f"Inclusions: {sample_stats['total_inclusions']:,}",
-                f"Mean/droplet: {sample_stats['total_inclusions'] / total_droplets:.2f}",
-                f"With incl: {sample_stats['with_inclusions'] / total_droplets * 100:.1f}%",
-            ])
+            rows.extend(["Inclusions", "Mean/droplet", "With inclusions"])
+            mean_inc = s["total_inclusions"] / s["total_droplets"] if s["total_droplets"] > 0 else 0
+            pct_with = s["with_inclusions"] / s["total_droplets"] * 100 if s["total_droplets"] > 0 else 0
+            vals.extend([f"{s['total_inclusions']:,}", f"{mean_inc:.2f}", f"{pct_with:.1f}%"])
+        if self.use_poisson and s.get("lambda_val") is not None:
+            rows.append("Lambda")
+            vals.append(f"{s['lambda_val']:.4f}")
+            if s.get("p_value") is not None:
+                result = "FOLLOWS" if s["p_value"] > 0.05 else "DEVIATES"
+                rows.extend(["Chi-squared", "P-value", "Result"])
+                vals.extend([f"{s['chi2']:.2f}", f"{s['p_value']:.4f}", f"{result} Poisson"])
+
+        cell_data = [[v] for v in vals]
+        table = ax_table.table(cellText=cell_data, rowLabels=rows, colLabels=[s["label"]],
+                               loc="center", cellLoc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.0, 1.3)
+        ax_table.set_title("Summary", fontweight="bold")
+
+        # [0,1]: Size distribution
+        ax_size = fig.add_subplot(gs[0, 1])
+        self._draw_size_dist(ax_size, df, sample_stats)
+
+        # [1,0]: Poisson or placeholder
+        ax_poisson = fig.add_subplot(gs[1, 0])
+        if self.use_poisson:
+            self._draw_poisson(ax_poisson, df, sample_stats)
         else:
-            stats_lines.append("Inclusions: OFF")
+            ax_poisson.axis("off")
+            ax_poisson.text(0.5, 0.5, "Poisson: OFF", ha="center", va="center",
+                            fontsize=14, transform=ax_poisson.transAxes)
 
-        stats_lines.extend([
-            "",
-            f"Diameter: {sample_stats['mean_d']:.1f} +/- {sample_stats['std_d']:.1f} um",
-            f"CV (diameter): {sample_stats['cv']:.1f}%",
-        ])
-
-        if self.use_poisson and sample_stats.get("lambda_val") is not None:
-            stats_lines.extend([
-                "",
-                f"Dilution: {self.dilution}x",
-                f"l theoretical: {sample_stats['lambda_val']:.4f}",
-            ])
-            if sample_stats.get("p_value") is not None:
-                result = "FOLLOWS" if sample_stats["p_value"] > 0.05 else "DEVIATES"
-                stats_lines.append(f"Result: {result} Poisson")
-
-        ax_stats.axis("off")
-        ax_stats.text(0.1, 0.95, "\n".join(stats_lines), transform=ax_stats.transAxes,
-                      fontsize=11, verticalalignment="top", fontfamily="monospace",
-                      bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.3))
-        ax_stats.set_title("Summary")
-
-        # Sample frames (bottom row)
-        for i, frame in enumerate(sample_pngs[:n_cols]):
-            ax_sample = fig.add_subplot(gs[1, i])
-            ax_sample.imshow(frame["image"])
-            ax_sample.set_title(f"Frame {frame['frame_idx']}")
-            ax_sample.axis("off")
+        # [1,1]: Stats text box
+        ax_stats = fig.add_subplot(gs[1, 1])
+        self._draw_stats_box(ax_stats, df, sample_stats)
 
         plt.suptitle("DropDrop Analysis Report", fontsize=14, fontweight="bold")
         plt.tight_layout()
@@ -458,8 +404,12 @@ class Analysis:
         if self.use_poisson:
             self._plot_overlaid_poisson(axes_limits)
 
-        # Summary report with sample frame collage
+        # Summary report (stats only, frames go in PDF)
         self._create_summary_report(all_stats, axes_limits)
+
+        # PDF report with cover, stats, and per-sample frame grids
+        self._generate_pdf(all_stats)
+
         self._write_multiplex_summary(all_stats)
         self._print_multiplex_summary(all_stats)
 
@@ -553,13 +503,13 @@ class Analysis:
         plt.close()
 
     def _create_summary_report(self, all_stats, axes_limits):
-        """Create summary_report.png with table, plots, CV barplot, and sample collage."""
+        """Create summary_report.png with table, plots, and CV barplot (no sample collage)."""
         n_samples = len(self.samples)
         colors = plt.cm.Set2(np.linspace(0, 1, n_samples))
 
-        # Layout: 3 rows — [table, size_dist] [CV, poisson] [sample collage]
-        fig = plt.figure(figsize=(14, 14))
-        gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 0.8])
+        # Layout: 2 rows — [table, size_dist] [CV, poisson]
+        fig = plt.figure(figsize=(14, 10))
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1])
 
         # [0,0]: Comparison table
         ax_table = fig.add_subplot(gs[0, 0])
@@ -644,24 +594,340 @@ class Analysis:
             ax_poisson.text(0.5, 0.5, "Poisson: OFF", ha="center", va="center",
                             fontsize=14, transform=ax_poisson.transAxes)
 
-        # [2, :]: Sample frame collage — one representative per sample
-        collage_gs = gs[2, :].subgridspec(1, n_samples)
-        for i, sample in enumerate(self.samples):
-            ax_frame = fig.add_subplot(collage_gs[0, i])
-            pngs = self._load_sample_pngs(sample)
-            if pngs:
-                ax_frame.imshow(pngs[0]["image"])
-                ax_frame.set_title(f"{sample['label']} (frame {pngs[0]['frame_idx']})")
-            else:
-                ax_frame.text(0.5, 0.5, "No samples", ha="center", va="center",
-                              transform=ax_frame.transAxes)
-                ax_frame.set_title(sample["label"])
-            ax_frame.axis("off")
-
         plt.suptitle("DropDrop Multiplex Report", fontsize=14, fontweight="bold")
         plt.tight_layout()
         plt.savefig(self.output_dir / "summary_report.png", dpi=200, bbox_inches="tight")
         plt.close()
+
+    # --- PDF generation ---
+
+    def _render_cover_page(self, pdf, all_stats, is_multiplex):
+        """Render a cover page into the PDF."""
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        ax.axis("off")
+
+        lines = ["DropDrop Analysis Report", ""]
+        lines.append(datetime.now().strftime("%Y-%m-%d %H:%M"))
+        lines.append("")
+
+        if is_multiplex:
+            labels = [s["label"] for s in all_stats]
+            lines.append(f"Samples: {', '.join(labels)}")
+        else:
+            lines.append(f"Sample: {all_stats[0]['label']}")
+
+        lines.append("")
+        lines.append(f"Inclusions: {'ON' if self.use_inclusions else 'OFF'}")
+        lines.append(f"Poisson: {'ON' if self.use_poisson else 'OFF'}")
+        if self.use_poisson:
+            lines.append(f"Dilution: {self.dilution}x")
+
+        ax.text(0.5, 0.6, lines[0], transform=ax.transAxes,
+                fontsize=24, fontweight="bold", ha="center", va="center")
+        ax.text(0.5, 0.4, "\n".join(lines[1:]), transform=ax.transAxes,
+                fontsize=12, ha="center", va="center", fontfamily="monospace")
+
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    def _render_sample_grid(self, pdf, sample_pngs, title):
+        """Render sample frames as an 8x4 grid page in the PDF (letter size)."""
+        n_cols, n_rows = 8, 4
+        max_frames = n_cols * n_rows
+
+        images = sample_pngs[:max_frames]
+        if not images:
+            return
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(11, 8.5))
+        fig.suptitle(title, fontsize=14, fontweight="bold")
+
+        for idx in range(n_rows * n_cols):
+            row, col = divmod(idx, n_cols)
+            ax = axes[row][col]
+            if idx < len(images):
+                ax.imshow(images[idx]["image"])
+                ax.set_title(f"F{images[idx]['frame_idx']}", fontsize=7)
+            ax.axis("off")
+
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    def _generate_pdf(self, all_stats):
+        """Generate multi-page PDF report."""
+        is_multiplex = len(self.samples) > 1
+        pdf_name = "summary_report.pdf" if is_multiplex else "report.pdf"
+        pdf_path = self.output_dir / pdf_name
+
+        with PdfPages(pdf_path) as pdf:
+            # Page 1: Cover
+            self._render_cover_page(pdf, all_stats, is_multiplex)
+
+            # Page 2: Main stats report (re-render the PNG figure into PDF)
+            if is_multiplex:
+                axes_limits = self._compute_global_axes()
+                self._render_summary_report_page(pdf, all_stats, axes_limits)
+            else:
+                self._render_single_report_page(pdf, all_stats[0])
+
+            # Sample frame grids
+            for sample in self.samples:
+                pngs = self._load_sample_pngs(sample)
+                if pngs:
+                    title = f"Sample Frames: {sample['label']}"
+                    self._render_sample_grid(pdf, pngs, title)
+
+        print(f"PDF report: {pdf_path}")
+
+    def _render_single_report_page(self, pdf, sample_stats):
+        """Render single-sample stats page into PDF (letter size, 2x2 grid)."""
+        df = self.samples[0]["df"]
+
+        fig = plt.figure(figsize=(11, 8.5))
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1])
+
+        # [0,0]: Stats table
+        ax_table = fig.add_subplot(gs[0, 0])
+        ax_table.axis("off")
+        s = sample_stats
+        rows = ["Droplets", "Mean (um)", "Median (um)", "Std (um)", "CV (%)"]
+        vals = [
+            f"{s['total_droplets']:,}",
+            f"{s['mean_d']:.1f}",
+            f"{s['median_d']:.1f}",
+            f"{s['std_d']:.1f}",
+            f"{s['cv']:.1f}",
+        ]
+        if self.use_inclusions:
+            rows.extend(["Inclusions", "Mean/droplet", "With inclusions"])
+            mean_inc = s["total_inclusions"] / s["total_droplets"] if s["total_droplets"] > 0 else 0
+            pct_with = s["with_inclusions"] / s["total_droplets"] * 100 if s["total_droplets"] > 0 else 0
+            vals.extend([f"{s['total_inclusions']:,}", f"{mean_inc:.2f}", f"{pct_with:.1f}%"])
+        if self.use_poisson and s.get("lambda_val") is not None:
+            rows.append("Lambda")
+            vals.append(f"{s['lambda_val']:.4f}")
+            if s.get("p_value") is not None:
+                result = "FOLLOWS" if s["p_value"] > 0.05 else "DEVIATES"
+                rows.extend(["Chi-squared", "P-value", "Result"])
+                vals.extend([f"{s['chi2']:.2f}", f"{s['p_value']:.4f}", f"{result} Poisson"])
+
+        cell_data = [[v] for v in vals]
+        table = ax_table.table(cellText=cell_data, rowLabels=rows, colLabels=[s["label"]],
+                               loc="center", cellLoc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.0, 1.3)
+        ax_table.set_title("Summary", fontweight="bold")
+
+        # [0,1]: Size distribution
+        ax_size = fig.add_subplot(gs[0, 1])
+        self._draw_size_dist(ax_size, df, sample_stats)
+
+        # [1,0]: Poisson or placeholder
+        ax_poisson = fig.add_subplot(gs[1, 0])
+        if self.use_poisson:
+            self._draw_poisson(ax_poisson, df, sample_stats)
+        else:
+            ax_poisson.axis("off")
+            ax_poisson.text(0.5, 0.5, "Poisson: OFF", ha="center", va="center",
+                            fontsize=14, transform=ax_poisson.transAxes)
+
+        # [1,1]: Stats text box
+        ax_stats = fig.add_subplot(gs[1, 1])
+        self._draw_stats_box(ax_stats, df, sample_stats)
+
+        plt.suptitle("DropDrop Analysis Report", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    def _render_summary_report_page(self, pdf, all_stats, axes_limits):
+        """Render the multiplex stats page into PDF (letter size)."""
+        n_samples = len(self.samples)
+        colors = plt.cm.Set2(np.linspace(0, 1, n_samples))
+
+        fig = plt.figure(figsize=(11, 8.5))
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1])
+
+        # Table
+        ax_table = fig.add_subplot(gs[0, 0])
+        ax_table.axis("off")
+        columns = [s["label"] for s in all_stats]
+        rows = ["Droplets", "Mean (um)", "Median (um)", "Std (um)", "CV (%)"]
+        if self.use_inclusions:
+            rows.extend(["Inclusions", "Mean/droplet"])
+
+        cell_data = []
+        for row_name in rows:
+            row_vals = []
+            for s in all_stats:
+                if row_name == "Droplets":
+                    row_vals.append(f"{s['total_droplets']:,}")
+                elif row_name == "Mean (um)":
+                    row_vals.append(f"{s['mean_d']:.1f}")
+                elif row_name == "Median (um)":
+                    row_vals.append(f"{s['median_d']:.1f}")
+                elif row_name == "Std (um)":
+                    row_vals.append(f"{s['std_d']:.1f}")
+                elif row_name == "CV (%)":
+                    row_vals.append(f"{s['cv']:.1f}")
+                elif row_name == "Inclusions":
+                    row_vals.append(f"{s['total_inclusions']:,}")
+                elif row_name == "Mean/droplet":
+                    mean_inc = s["total_inclusions"] / s["total_droplets"] if s["total_droplets"] > 0 else 0
+                    row_vals.append(f"{mean_inc:.2f}")
+            cell_data.append(row_vals)
+
+        table = ax_table.table(cellText=cell_data, rowLabels=rows, colLabels=columns,
+                               loc="center", cellLoc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.0, 1.4)
+        ax_table.set_title("Sample Comparison", fontweight="bold")
+
+        # Size distribution
+        ax_size = fig.add_subplot(gs[0, 1])
+        bins = axes_limits["bins"]
+        for i, sample in enumerate(self.samples):
+            ax_size.hist(sample["df"]["diameter_um"].values, bins=bins,
+                         color=colors[i], edgecolor="black", alpha=0.5, label=sample["label"])
+        ax_size.set_xlabel("Diameter (um)")
+        ax_size.set_ylabel("Count")
+        ax_size.set_title("Size Distribution")
+        ax_size.legend()
+        ax_size.grid(True, alpha=0.3)
+
+        # CV barplot
+        ax_cv = fig.add_subplot(gs[1, 0])
+        labels = [s["label"] for s in all_stats]
+        cvs = [s["cv"] for s in all_stats]
+        ax_cv.bar(labels, cvs, color=colors[:len(labels)], edgecolor="black", alpha=0.8)
+        ax_cv.set_ylabel("CV (%)")
+        ax_cv.set_title("Coefficient of Variation")
+        ax_cv.grid(True, alpha=0.3, axis="y")
+        for j, v in enumerate(cvs):
+            ax_cv.text(j, v + 0.3, f"{v:.1f}%", ha="center", fontsize=9)
+
+        # Poisson
+        ax_poisson = fig.add_subplot(gs[1, 1])
+        if self.use_poisson:
+            x_range = np.arange(0, axes_limits["poisson_x_max"] + 1)
+            n_s = len(self.samples)
+            bw = 0.8 / n_s
+            for i, sample in enumerate(self.samples):
+                actual = sample["df"]["inclusions"].value_counts().sort_index()
+                n_drop = len(sample["df"])
+                detected_pct = [actual.get(k, 0) / n_drop * 100 for k in x_range]
+                offset = (i - n_s / 2 + 0.5) * bw
+                ax_poisson.bar(x_range + offset, detected_pct, bw,
+                               label=sample["label"], color=colors[i], alpha=0.8)
+            ax_poisson.set_xlabel("Inclusions per Droplet")
+            ax_poisson.set_ylabel("Percentage (%)")
+            ax_poisson.set_title("Inclusion Distribution")
+            ax_poisson.set_xticks(x_range)
+            ax_poisson.legend()
+            ax_poisson.grid(True, alpha=0.3, axis="y")
+        else:
+            ax_poisson.axis("off")
+            ax_poisson.text(0.5, 0.5, "Poisson: OFF", ha="center", va="center",
+                            fontsize=14, transform=ax_poisson.transAxes)
+
+        plt.suptitle("DropDrop Multiplex Report", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    def _draw_size_dist(self, ax, df, sample_stats):
+        """Draw size distribution histogram on given axes."""
+        diameters = df["diameter_um"].values
+        ax.hist(diameters, bins=25, color="steelblue", edgecolor="black", alpha=0.7)
+        ax.axvline(sample_stats["mean_d"], color="red", linestyle="--",
+                    label=f"Mean: {sample_stats['mean_d']:.1f}")
+        ax.axvline(sample_stats["median_d"], color="green", linestyle="--",
+                    label=f"Median: {sample_stats['median_d']:.1f}")
+        ax.set_xlabel("Diameter (um)")
+        ax.set_ylabel("Count")
+        ax.set_title("Droplet Size Distribution")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    def _draw_poisson(self, ax, df, sample_stats):
+        """Draw Poisson comparison chart on given axes."""
+        if sample_stats.get("lambda_val") is None:
+            return
+        median_d = df["diameter_um"].median()
+        x_range, theoretical, lambda_val = self._calculate_poisson(df, median_d)
+        actual = df["inclusions"].value_counts().sort_index()
+        n_droplets = len(df)
+        detected_pct = [actual.get(i, 0) / n_droplets * 100 for i in x_range]
+        theoretical_pct = theoretical * 100
+
+        x = np.arange(len(x_range))
+        width = 0.35
+        ax.bar(x - width / 2, detected_pct, width,
+               label="Detected", color="royalblue", alpha=0.8)
+        ax.bar(x + width / 2, theoretical_pct[:len(x)], width,
+               label=f"Poisson (l={lambda_val:.3f})", color="coral", alpha=0.8)
+        if sample_stats.get("p_value") is not None:
+            result_text = f"X2 = {sample_stats['chi2']:.2f}, p = {sample_stats['p_value']:.4f}"
+            result_text += "\nFollows Poisson" if sample_stats["p_value"] > 0.05 else "\nDeviates"
+            ax.text(0.98, 0.85, result_text, transform=ax.transAxes,
+                    ha="right", va="top", fontsize=10,
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8))
+        ax.set_xlabel("Inclusions per Droplet")
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title("Inclusion Distribution")
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_range)
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis="y")
+
+    def _draw_stats_box(self, ax, df, sample_stats):
+        """Draw summary stats text box on given axes."""
+        project_name = self.output_dir.name
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        total_frames = df["frame"].nunique()
+        total_droplets = len(df)
+
+        stats_lines = [
+            f"Project: {project_name}",
+            f"Date: {timestamp}",
+            f"Frames: {total_frames}",
+            "",
+            f"Droplets: {total_droplets:,}",
+        ]
+
+        if self.use_inclusions:
+            stats_lines.extend([
+                f"Inclusions: {sample_stats['total_inclusions']:,}",
+                f"Mean/droplet: {sample_stats['total_inclusions'] / total_droplets:.2f}",
+                f"With incl: {sample_stats['with_inclusions'] / total_droplets * 100:.1f}%",
+            ])
+        else:
+            stats_lines.append("Inclusions: OFF")
+
+        stats_lines.extend([
+            "",
+            f"Diameter: {sample_stats['mean_d']:.1f} +/- {sample_stats['std_d']:.1f} um",
+            f"CV (diameter): {sample_stats['cv']:.1f}%",
+        ])
+
+        if self.use_poisson and sample_stats.get("lambda_val") is not None:
+            stats_lines.extend([
+                "",
+                f"Dilution: {self.dilution}x",
+                f"l theoretical: {sample_stats['lambda_val']:.4f}",
+            ])
+            if sample_stats.get("p_value") is not None:
+                result = "FOLLOWS" if sample_stats["p_value"] > 0.05 else "DEVIATES"
+                stats_lines.append(f"Result: {result} Poisson")
+
+        ax.axis("off")
+        ax.text(0.1, 0.95, "\n".join(stats_lines), transform=ax.transAxes,
+                fontsize=11, verticalalignment="top", fontfamily="monospace",
+                bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.3))
+        ax.set_title("Summary")
 
     def _write_multiplex_summary(self, all_stats):
         """Write merged summary.txt."""
