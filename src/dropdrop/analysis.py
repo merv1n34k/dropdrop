@@ -1,5 +1,7 @@
 """Statistical analysis for droplet detection results."""
 
+import json
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +24,8 @@ plt.rcParams["savefig.dpi"] = 300
 class Analysis:
     """Statistical analysis — auto-discovers .tmp_* dirs in output directory.
 
-    Single sample  → report.png (stats) + report.pdf (cover, stats, sample grid)
-    Multiple samples → summary_report.png (stats) + summary_report.pdf (cover, stats, per-sample grids)
+    Single sample  → report.png (stats) + report.pdf (cover, stats, tiled mosaic)
+    Multiple samples → summary_report.png (stats) + summary_report.pdf (cover, stats, per-sample mosaics)
     """
 
     def __init__(self, output_dir, settings):
@@ -46,10 +48,16 @@ class Analysis:
             label = tmp_dir.name[5:]  # strip ".tmp_"
             csv_path = tmp_dir / "data.csv"
             if csv_path.exists():
+                layout_path = tmp_dir / "layout.json"
+                layout = None
+                if layout_path.exists():
+                    with open(layout_path) as f:
+                        layout = json.load(f)
                 self.samples.append({
                     "label": label,
                     "df": pd.read_csv(csv_path),
-                    "sample_pngs": sorted(tmp_dir.glob("sample_*.png")),
+                    "frame_pngs": sorted(tmp_dir.glob("frame_*.png")),
+                    "layout": layout,
                 })
 
     def run(self):
@@ -134,16 +142,66 @@ class Analysis:
         chi2, p_value = stats.chisquare(obs_f, exp_f)
         return chi2, p_value
 
-    def _load_sample_pngs(self, sample):
-        """Load sample frame PNGs as RGB arrays."""
-        images = []
-        for png_path in sample["sample_pngs"]:
-            img = cv2.imread(str(png_path))
-            if img is not None:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                frame_idx = png_path.stem.split("_")[1]
-                images.append({"image": img, "frame_idx": frame_idx})
-        return images
+    def _build_mosaic(self, sample, max_px=3500, gap=2):
+        """Stitch all frame overlays into one compressed tiled image (RGB).
+
+        Frames are placed at their true grid cells when a scanprotocol layout is
+        available, otherwise arranged in a near-square montage by frame index.
+        The composite long edge is capped at ``max_px`` to keep PDF size sane.
+        """
+        paths = sorted(
+            sample["frame_pngs"], key=lambda p: int(p.stem.split("_")[1])
+        )
+        if not paths:
+            return None
+
+        layout = sample.get("layout")
+        n = len(paths)
+        if layout and layout.get("cells") and layout.get("frames"):
+            cols, rows = layout["cols"], layout["rows"]
+            cell_by_frame = {
+                f: tuple(c) for f, c in zip(layout["frames"], layout["cells"])
+            }
+            # Place each frame at its acquired grid cell; skip unknown frames
+            placed = []
+            for p in paths:
+                idx = int(p.stem.split("_")[1])
+                if idx in cell_by_frame:
+                    placed.append((p, cell_by_frame[idx]))
+            paths = [p for p, _ in placed]
+            cells = [c for _, c in placed]
+            if not paths:
+                return None
+        else:
+            cols = math.ceil(math.sqrt(n))
+            rows = math.ceil(n / cols)
+            cells = [divmod(i, cols) for i in range(n)]
+
+        # Tile size that keeps the composite long edge under max_px
+        cell_w = max(1, (max_px - (cols + 1) * gap) // cols)
+        cell_h = max(1, (max_px - (rows + 1) * gap) // rows)
+        # Preserve frame aspect ratio using the first readable frame
+        probe = cv2.imread(str(paths[0]))
+        if probe is None:
+            return None
+        fh, fw = probe.shape[:2]
+        scale = min(cell_w / fw, cell_h / fh)
+        tw, th = max(1, int(fw * scale)), max(1, int(fh * scale))
+
+        canvas_w = cols * tw + (cols + 1) * gap
+        canvas_h = rows * th + (rows + 1) * gap
+        canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+
+        for path, (row, col) in zip(paths, cells):
+            img = cv2.imread(str(path))
+            if img is None:
+                continue
+            img = cv2.resize(img, (tw, th), interpolation=cv2.INTER_AREA)
+            y = gap + row * (th + gap)
+            x = gap + col * (tw + gap)
+            canvas[y:y + th, x:x + tw] = img
+
+        return cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
 
     # --- Single sample path ---
 
@@ -630,26 +688,15 @@ class Analysis:
         pdf.savefig(fig)
         plt.close(fig)
 
-    def _render_sample_grid(self, pdf, sample_pngs, title):
-        """Render sample frames as an 8x4 grid page in the PDF (letter size)."""
-        n_cols, n_rows = 8, 4
-        max_frames = n_cols * n_rows
-
-        images = sample_pngs[:max_frames]
-        if not images:
+    def _render_tiled_page(self, pdf, mosaic, title):
+        """Render a full tiled mosaic as a single titled PDF page (letter size)."""
+        if mosaic is None:
             return
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(11, 8.5))
+        fig, ax = plt.subplots(figsize=(11, 8.5))
         fig.suptitle(title, fontsize=14, fontweight="bold")
-
-        for idx in range(n_rows * n_cols):
-            row, col = divmod(idx, n_cols)
-            ax = axes[row][col]
-            if idx < len(images):
-                ax.imshow(images[idx]["image"])
-                ax.set_title(f"F{images[idx]['frame_idx']}", fontsize=7)
-            ax.axis("off")
-
+        ax.imshow(mosaic, interpolation="none")
+        ax.axis("off")
         plt.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
@@ -671,12 +718,12 @@ class Analysis:
             else:
                 self._render_single_report_page(pdf, all_stats[0])
 
-            # Sample frame grids
+            # Full tiled mosaic — one page per sample
             for sample in self.samples:
-                pngs = self._load_sample_pngs(sample)
-                if pngs:
-                    title = f"Sample Frames: {sample['label']}"
-                    self._render_sample_grid(pdf, pngs, title)
+                mosaic = self._build_mosaic(sample)
+                if mosaic is not None:
+                    title = f"Tiled Frames: {sample['label']}"
+                    self._render_tiled_page(pdf, mosaic, title)
 
         print(f"PDF report: {pdf_path}")
 

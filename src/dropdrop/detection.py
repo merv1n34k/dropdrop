@@ -1,5 +1,6 @@
 """Main droplet and inclusion detection pipeline."""
 
+import json
 import re
 import sys
 from collections import defaultdict
@@ -12,32 +13,31 @@ from tqdm import tqdm
 
 from .cache import Cache
 from .config import load_config
+from . import scanprotocol
 
 
 class Detection:
     """Main pipeline for droplet and inclusion detection."""
 
     def __init__(self, config=None, store_visualizations=False, use_cache=True,
-                 sample_count=32, detect_inclusions=True):
+                 detect_inclusions=True):
         """Initialize pipeline with configuration.
 
         Args:
             config: Configuration dict. If None, loads from config.json.
             store_visualizations: Whether to store visualization data for UI.
             use_cache: Whether to use caching for expensive computations.
-            sample_count: Number of sample frames to store for report (default 32).
             detect_inclusions: Whether to detect inclusions inside droplets.
         """
         self.config = config if config else load_config()
         self.results_data = []
         self.store_visualizations = store_visualizations
         self.visualization_data = {} if store_visualizations else None
-        self.sample_count = sample_count
-        self.sample_frames = {}  # Always store a few samples for report
         self.use_cache = use_cache
         self.cache = Cache(self.config) if use_cache else None
         self.detect_inclusions = detect_inclusions
         self._cellpose_model = None
+        self._frame_output = None  # tmp dir where per-frame overlays stream
 
     def parse_filename(self, filename):
         """Extract z-stack index and frame index from filename.
@@ -256,10 +256,16 @@ class Detection:
         return filtered_mask, inclusion_count
 
     def process_frame(self, frame_idx, min_projection, droplet_coords=None):
-        """Process a single frame for droplets and inclusions."""
-        # Determine if we need to store viz data (for UI or sample)
-        is_sample = hasattr(self, "_sample_indices") and frame_idx in self._sample_indices
-        store_viz = self.store_visualizations or is_sample
+        """Process a single frame for droplets and inclusions.
+
+        Streams a per-frame overlay PNG to the tmp dir (when configured) so the
+        report can tile every frame, without buffering masks across frames.
+        """
+        store_viz = self.store_visualizations
+        save_overlay = self._frame_output is not None
+        overlay = (
+            cv2.cvtColor(min_projection, cv2.COLOR_GRAY2BGR) if save_overlay else None
+        )
 
         if store_viz:
             frame_viz = {
@@ -276,10 +282,9 @@ class Detection:
         if not droplet_coords:
             print(f"  Frame {frame_idx}: No droplets detected")
             if store_viz:
-                if self.store_visualizations:
-                    self.visualization_data[frame_idx] = frame_viz
-                if is_sample:
-                    self.sample_frames[frame_idx] = frame_viz
+                self.visualization_data[frame_idx] = frame_viz
+            if save_overlay:
+                self._save_overlay(frame_idx, overlay)
             return
 
         valid_droplet_idx = 0
@@ -330,6 +335,13 @@ class Detection:
                         min_projection, eroded_mask
                     )
 
+            if save_overlay:
+                cv2.drawContours(overlay, contours, -1, (0, 255, 0), 1)
+                if self.detect_inclusions:
+                    overlay[inclusion_mask > 0] = (0, 0, 255)
+                    cv2.putText(overlay, str(inclusion_count), (cx - 5, cy + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
             if store_viz:
                 frame_viz["droplet_masks"].append({
                     "mask": droplet_mask,
@@ -355,10 +367,13 @@ class Detection:
             valid_droplet_idx += 1
 
         if store_viz:
-            if self.store_visualizations:
-                self.visualization_data[frame_idx] = frame_viz
-            if is_sample:
-                self.sample_frames[frame_idx] = frame_viz
+            self.visualization_data[frame_idx] = frame_viz
+        if save_overlay:
+            self._save_overlay(frame_idx, overlay)
+
+    def _save_overlay(self, frame_idx, overlay):
+        """Write a single frame overlay PNG into the tmp output dir."""
+        cv2.imwrite(str(self._frame_output / f"frame_{frame_idx}.png"), overlay)
 
         frame_data = [d for d in self.results_data if d["frame"] == frame_idx]
         total_inclusions = sum(d["inclusions"] for d in frame_data)
@@ -388,10 +403,8 @@ class Detection:
             f"Found {len(frame_groups)} frames total, processing {len(frame_indices)} frames\n"
         )
 
-        # Select sample frames for report (random subset)
-        import random
-        n_samples = min(self.sample_count, len(frame_indices))
-        self._sample_indices = set(random.sample(frame_indices, n_samples))
+        # Stream a per-frame overlay PNG into the output dir for the tiled report
+        self._frame_output = output_path
 
         cache_hits = 0
         for frame_idx in tqdm(frame_indices, desc="Processing frames"):
@@ -420,6 +433,9 @@ class Detection:
         if cache_hits > 0:
             print(f"\nCache: {cache_hits}/{len(frame_indices)} frames loaded from cache")
 
+        # Persist the field tiling layout from the scanprotocol, if available
+        self._write_layout(input_dir, output_path, frame_indices)
+
         if self.results_data:
             df = pd.DataFrame(self.results_data)
             csv_path = output_path / "data.csv"
@@ -431,36 +447,18 @@ class Detection:
 
         return self.results_data
 
-    def save_sample_frames(self, output_dir):
-        """Render overlay on sample frames and save as PNGs.
-
-        Draws green droplet contours, red inclusion fills, and yellow
-        inclusion counts on each sample frame.
-        """
-        output_path = Path(output_dir)
-        for frame_idx, viz in self.sample_frames.items():
-            img = viz["min_projection"]
-            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-
-            for i, droplet in enumerate(viz["droplet_masks"]):
-                mask = droplet["mask"]
-                contours, _ = cv2.findContours(
-                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
-                cv2.drawContours(rgb, contours, -1, (0, 255, 0), 1)
-
-                if self.detect_inclusions:
-                    # Red inclusion fill
-                    inc_mask = viz["inclusion_masks"][i]
-                    rgb[inc_mask > 0] = (0, 0, 255)
-
-                    # Yellow count label
-                    cx, cy = droplet["center"]
-                    count = droplet["inclusions"]
-                    cv2.putText(rgb, str(count), (cx - 5, cy + 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-            cv2.imwrite(str(output_path / f"sample_{frame_idx}.png"), rgb)
+    def _write_layout(self, input_dir, output_path, frame_indices):
+        """Write layout.json describing the field grid for the tiled report."""
+        layout = scanprotocol.build_layout(input_dir, len(frame_indices))
+        if layout is None:
+            return
+        layout["frames"] = list(frame_indices)
+        with open(output_path / "layout.json", "w") as f:
+            json.dump(layout, f)
+        print(
+            f"Tile layout: {layout['cols']}x{layout['rows']} "
+            f"({layout['pattern']})"
+        )
 
     def print_summary(self, df):
         """Print one-line summary."""

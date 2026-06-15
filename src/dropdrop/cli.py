@@ -171,8 +171,6 @@ def run_detection(input_dir, tmp_dir, settings, args, cellpose_model=None):
             df = pd.DataFrame(results)
             df.to_csv(tmp_dir / "data.csv", index=False)
 
-        pipeline.save_sample_frames(str(tmp_dir))
-
     return pipeline._cellpose_model
 
 

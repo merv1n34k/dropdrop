@@ -148,7 +148,7 @@ results/<YYYYMMDD>_multiplex/
 
 ```
 CLI
-  -> Detection (per sample) -> .tmp_<label>/data.csv + sample_*.png
+  -> Detection (per sample) -> .tmp_<label>/data.csv + frame_*.png + layout.json
   -> Analysis.run(output_dir)  -- auto-discovers .tmp_* dirs
        1 sample  -> single report
        2+ samples -> multiplex report
