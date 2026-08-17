@@ -1,5 +1,8 @@
 # DropDrop
 
+> [!Warning]
+> The project is no longer supported, use project at your own risk. The replacement software is TBA.
+
 Automated pipeline for detecting droplets and inclusions (beads) in microscopy z-stacks using Cellpose segmentation and morphological analysis.
 
 Tailored for the EVOS M5000 Imaging System.
